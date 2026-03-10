@@ -1,150 +1,136 @@
 "use client";
 
+import { useState } from "react";
 import { useAccount } from "wagmi";
 import { usePositions } from "@/hooks/usePositions";
+
+type Filter = "all" | "open" | "closed";
 
 export function TransactionsView() {
   const { isConnected } = useAccount();
   const { data, isLoading } = usePositions();
+  const [filter, setFilter] = useState<Filter>("all");
 
-  const positions = data ?? [];
-  const hasPositions = positions.length > 0;
+  const all = data ?? [];
+  const filtered = filter === "all" ? all : all.filter((p) => p.state === (filter === "open" ? "OPEN" : "CLOSED"));
+
+  const openCount = all.filter((p) => p.state === "OPEN").length;
+  const closedCount = all.filter((p) => p.state === "CLOSED").length;
 
   return (
-    <section className="card-surface p-5 space-y-4">
+    <div className="card" style={{ padding: 20 }}>
       <div className="card-header">
-        <h2 className="text-sm font-medium text-textSecondary">
-          Positions & History
-        </h2>
-        <span className="pill">Wallet-linked</span>
+        <div>
+          <div className="metric-label" style={{ marginBottom: 3 }}>Transaction History</div>
+          <div style={{ fontFamily: "var(--sans)", fontSize: 15, fontWeight: 600, color: "var(--text-1)" }}>
+            Your Trading Activity
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <span className="pill pill-live">{openCount} Open</span>
+          <span className="pill">{closedCount} Closed</span>
+        </div>
       </div>
 
-      {!isConnected && (
-        <div className="text-xs text-textSecondary/80">
-          Connect your wallet to see open and closed positions on the Iran
-          regime market.
+      {/* Filter tabs */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+        {(["all", "open", "closed"] as Filter[]).map((f) => (
+          <button
+            key={f}
+            className={`nav-tab ${filter === f ? "active" : ""}`}
+            onClick={() => setFilter(f)}
+          >
+            {f.charAt(0).toUpperCase() + f.slice(1)}
+          </button>
+        ))}
+      </div>
+
+      {!isConnected ? (
+        <div style={{
+          textAlign: "center",
+          padding: "40px 20px",
+          background: "var(--surface-2)",
+          borderRadius: 12,
+          border: "1px solid var(--border)",
+        }}>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>
+            Connect your wallet to see trading history
+          </div>
+        </div>
+      ) : isLoading ? (
+        <div style={{ textAlign: "center", padding: "40px", fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>
+          Loading positions…
+        </div>
+      ) : filtered.length === 0 ? (
+        <div style={{
+          textAlign: "center",
+          padding: "40px 20px",
+          background: "var(--surface-2)",
+          borderRadius: 12,
+          border: "1px solid var(--border)",
+        }}>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>
+            No {filter !== "all" ? filter + " " : ""}positions found
+          </div>
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Side</th>
+                <th>Entry</th>
+                <th>Exit</th>
+                <th>Collateral</th>
+                <th>Borrowed</th>
+                <th>Size</th>
+                <th>Leverage</th>
+                <th>Fees</th>
+                <th>Order ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((p) => (
+                <tr key={p.id}>
+                  <td>
+                    <span className={p.state === "OPEN" ? "tag tag-open" : "tag tag-closed"}>
+                      {p.state}
+                    </span>
+                  </td>
+                  <td>
+                    <span className={`tag tag-${p.side.toLowerCase()}`}>{p.side}</span>
+                  </td>
+                  <td style={{ color: "var(--text-1)" }}>${p.entryPrice.toFixed(4)}</td>
+                  <td style={{ color: p.exitPrice ? "var(--text-1)" : "var(--text-3)" }}>
+                    {p.exitPrice ? `$${p.exitPrice.toFixed(4)}` : "—"}
+                  </td>
+                  <td>${p.collateral.toFixed(2)}</td>
+                  <td style={{ color: "var(--warn)" }}>${p.borrowed.toFixed(2)}</td>
+                  <td style={{ color: "var(--text-1)", fontWeight: 600 }}>${p.notional.toFixed(2)}</td>
+                  <td style={{ color: "var(--accent)" }}>{p.leverage.toFixed(1)}x</td>
+                  <td>${(p.fees.openFee + p.fees.closeFee).toFixed(4)}</td>
+                  <td>
+                    <span style={{ color: "var(--text-3)", fontSize: 10 }}>
+                      {p.id.length > 12 ? `${p.id.slice(0, 8)}…${p.id.slice(-4)}` : p.id}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
-      {isConnected && (
+      {/* Fee distribution note */}
+      {all.length > 0 && (
         <>
-          <div className="rounded-2xl bg-surfaceMuted border border-border/60 p-3 text-[11px] text-textSecondary">
-            <p>
-              Each row is a leveraged position on the Polymarket question{" "}
-              <span className="text-textPrimary">
-                “Will the Iranian regime fall by June 30?”
-              </span>
-              . Open positions have a primary{" "}
-              <span className="text-textPrimary font-semibold">Close</span>{" "}
-              button that unwinds the real Polymarket trade and repays the
-              vault.
-            </p>
+          <div className="gradient-line" />
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", lineHeight: 1.8 }}>
+            Fees distribute to: 50% LP Vault · 30% Insurance Fund · 20% Treasury
           </div>
-
-          {isLoading && (
-            <div className="text-xs text-textSecondary/80">Loading…</div>
-          )}
-
-          {!isLoading && !hasPositions && (
-            <div className="text-xs text-textSecondary/80">
-              No positions found for the connected wallet.
-            </div>
-          )}
-
-          {hasPositions && (
-            <div className="space-y-2 text-[11px]">
-              {positions.map((p) => (
-                <div
-                  key={p.id}
-                  className="rounded-xl bg-background/40 border border-border/60 px-3 py-2 flex flex-col gap-1"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          p.side === "YES"
-                            ? "bg-emerald-500/20 text-emerald-300"
-                            : "bg-sky-500/20 text-sky-300"
-                        }`}
-                      >
-                        {p.side}
-                      </span>
-                      <span className="text-textSecondary">
-                        {p.state === "OPEN" ? "Open" : "Closed"}
-                      </span>
-                    </div>
-                    <span className="text-textSecondary">
-                      x{p.leverage.toFixed(2)}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-1">
-                    <div>
-                      <div className="text-textSecondary">Entry</div>
-                      <div className="text-textPrimary">
-                        {p.entryPrice.toFixed(2)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-textSecondary">Exit</div>
-                      <div className="text-textPrimary">
-                        {p.exitPrice != null ? p.exitPrice.toFixed(2) : "—"}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-textSecondary">Collateral</div>
-                      <div className="text-textPrimary">
-                        ${p.collateral.toFixed(2)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-textSecondary">Borrowed</div>
-                      <div className="text-textPrimary">
-                        ${p.borrowed.toFixed(2)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-textSecondary">Position Size</div>
-                      <div className="text-textPrimary">
-                        ${p.notional.toFixed(2)}
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-textSecondary">Fees (open+close)</div>
-                      <div className="text-textPrimary">
-                        ${(p.fees.openFee + p.fees.closeFee).toFixed(2)}
-                      </div>
-                    </div>
-                  </div>
-                  {p.state === "OPEN" && (
-                    <div className="pt-1">
-                      <button
-                        className="btn-primary w-full"
-                        onClick={async () => {
-                          const res = await fetch("/api/trade/close", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              orderId: p.id,
-                              repayAmount: p.borrowed,
-                            }),
-                          });
-                          if (!res.ok) {
-                            const text = await res.text();
-                            alert(text);
-                          }
-                        }}
-                      >
-                        Close Position
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
         </>
       )}
-    </section>
+    </div>
   );
 }
-
