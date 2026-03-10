@@ -1,0 +1,42 @@
+{
+  "name": "demo_test",
+  "version": "1.0.0",
+  "description": "Leveraged prediction market terminal for the Polymarket question: Will the Iranian regime fall by June 30?",
+  "main": "next.config.mjs",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chait1217/Demo_test.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Chait1217/Demo_test/issues"
+  },
+  "homepage": "https://github.com/Chait1217/Demo_test#readme",
+  "dependencies": {
+    "@polymarket/clob-client": "^5.8.0",
+    "@tailwindcss/postcss": "^4.2.1",
+    "@tanstack/react-query": "^5.90.21",
+    "@types/node": "^25.4.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.4.27",
+    "ethers": "^5.8.0",
+    "next": "^14.2.35",
+    "postcss": "^8.5.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.9.3",
+    "viem": "^2.47.1",
+    "wagmi": "^2.19.5",
+    "zustand": "^5.0.11"
+  }
+}
