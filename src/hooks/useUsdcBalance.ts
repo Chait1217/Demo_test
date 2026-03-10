@@ -26,7 +26,6 @@ export function useUsdcBalance() {
   const { address } = useAccount();
   const client = usePublicClient();
   const [formatted, setFormatted] = useState("0.00");
-  const [rawBalance, setRawBalance] = useState(0);
 
   useEffect(() => {
     if (!client || !address) return;
@@ -35,12 +34,12 @@ export function useUsdcBalance() {
     async function load() {
       try {
         const [decimals, raw] = await Promise.all([
-          client!.readContract({
+          client.readContract({
             address: USDCe_ADDRESS,
             abi: ERC20_ABI,
             functionName: "decimals",
           }),
-          client!.readContract({
+          client.readContract({
             address: USDCe_ADDRESS,
             abi: ERC20_ABI,
             functionName: "balanceOf",
@@ -49,16 +48,22 @@ export function useUsdcBalance() {
         ]);
         if (cancelled) return;
         const value = Number(formatUnits(raw as bigint, decimals as number));
-        setRawBalance(value);
         setFormatted(value.toLocaleString(undefined, { maximumFractionDigits: 2 }));
       } catch {
-        if (!cancelled) { setFormatted("0.00"); setRawBalance(0); }
+        if (!cancelled) setFormatted("0.00");
       }
     }
     load();
+
     const interval = setInterval(load, 15_000);
-    return () => { cancelled = true; clearInterval(interval); };
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
   }, [client, address]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { display: `$${formatted}`, rawBalance };
+  return {
+    display: `$${formatted}`,
+  };
 }
+

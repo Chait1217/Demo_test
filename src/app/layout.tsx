@@ -1,27 +1,33 @@
 import "./globals.css";
 import type { ReactNode } from "react";
+import { Inter } from "next/font/google";
 import { WalletProviders } from "@/lib/wagmi";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 
+const inter = Inter({ subsets: ["latin"] });
+
 export const metadata = {
-  title: "IranMarket — Leveraged Prediction Terminal",
-  description: "Trade leveraged positions on Will the Iranian regime fall by June 30?",
+  title: "Leverage Terminal – Iran Regime Market",
+  description:
+    "Leveraged prediction market terminal for the Polymarket question: Will the Iranian regime fall by June 30?",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-      </head>
-      <body>
+    <html lang="en" className="dark">
+      <body
+        className={`${inter.className} min-h-screen`}
+        style={{ backgroundColor: "#050711", color: "#f9fafb" }}
+      >
         <ErrorBoundary>
           <WalletProviders>
-            {children}
+            <div className="min-h-screen" style={{ background: "linear-gradient(to bottom, #050711, #050711, #020311)" }}>
+              {children}
+            </div>
           </WalletProviders>
         </ErrorBoundary>
       </body>
     </html>
   );
 }
+
