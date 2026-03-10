@@ -3,8 +3,6 @@
 import { useAccount, useConnect, useDisconnect } from "wagmi";
 import { injected } from "wagmi/connectors";
 
-const injectedConnector = injected();
-
 export function useWallet() {
   const { address, isConnecting, isConnected } = useAccount();
   const { connect, isPending: isConnectPending } = useConnect();
@@ -14,8 +12,8 @@ export function useWallet() {
     address,
     isConnected,
     isConnecting: isConnecting || isConnectPending,
-    connect: () => connect({ connector: injectedConnector }),
+    // Create connector inline — never at module scope outside React
+    connect: () => connect({ connector: injected() }),
     disconnect,
   };
 }
-

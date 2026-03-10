@@ -1,66 +1,157 @@
 "use client";
 
-import { VaultView } from "../components/vault/VaultView";
-import { TradingView } from "../components/trading/TradingView";
-import { TransactionsView } from "../components/transactions/TransactionsView";
+import { useState } from "react";
 import { useWallet } from "@/hooks/useWallet";
 import { useUsdcBalance } from "@/hooks/useUsdcBalance";
+import { VaultView } from "@/components/vault/VaultView";
+import { TradingView } from "@/components/trading/TradingView";
+import { TransactionsView } from "@/components/transactions/TransactionsView";
+
+type Tab = "trade" | "vault" | "history";
 
 export default function HomePage() {
   const { address, isConnected, isConnecting, connect, disconnect } = useWallet();
   const { display: usdcDisplay } = useUsdcBalance();
+  const [tab, setTab] = useState<Tab>("trade");
 
-  const shortAddress =
-    address && `${address.slice(0, 6)}…${address.slice(address.length - 4)}`;
+  const short = address
+    ? `${address.slice(0, 6)}…${address.slice(-4)}`
+    : null;
 
   return (
-    <main className="px-8 py-6 max-w-7xl mx-auto space-y-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Leverage Terminal
-          </h1>
-          <p className="text-sm text-textSecondary">
-            Leveraged prediction market on Polymarket –&nbsp;
-            <span className="font-medium text-textPrimary">
-              Will the Iranian regime fall by June 30?
-            </span>
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {isConnected && (
-            <div className="px-3 py-1 rounded-full border border-border text-xs text-textSecondary bg-surface/60 flex items-center gap-2">
-              <span>Polygon • USDC.e</span>
-              <span className="w-px h-3 bg-border/60" />
-              <span className="text-textPrimary font-medium">{usdcDisplay}</span>
+    <div style={{ minHeight: "100vh" }}>
+      {/* Top bar */}
+      <header style={{
+        borderBottom: "1px solid var(--border)",
+        background: "rgba(7,10,20,0.8)",
+        backdropFilter: "blur(12px)",
+        position: "sticky",
+        top: 0,
+        zIndex: 50,
+      }}>
+        <div style={{
+          maxWidth: 1400,
+          margin: "0 auto",
+          padding: "0 24px",
+          height: 56,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 24,
+        }}>
+          {/* Logo + market badge */}
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: 8,
+                background: "linear-gradient(135deg, var(--accent), #00b8ff)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 14, fontWeight: 700, color: "#000",
+                fontFamily: "var(--mono)",
+              }}>L</div>
+              <span style={{
+                fontFamily: "var(--sans)",
+                fontWeight: 700,
+                fontSize: 16,
+                color: "var(--text-1)",
+                letterSpacing: "-0.02em",
+              }}>LevMarket</span>
             </div>
-          )}
-          <button
-            className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-black shadow-xl-soft min-w-[150px]"
-            onClick={() => (isConnected ? disconnect() : connect())}
-            disabled={isConnecting}
-          >
-            {isConnecting
-              ? "Connecting..."
-              : isConnected
-              ? shortAddress
-              : "Connect Wallet"}
-          </button>
+            <div style={{
+              height: 20,
+              width: 1,
+              background: "var(--border)",
+            }} />
+            <div className="pill pill-live" style={{ fontSize: 10 }}>
+              Iran Regime Market
+            </div>
+          </div>
+
+          {/* Nav tabs */}
+          <nav style={{ display: "flex", gap: 4 }}>
+            {(["trade", "vault", "history"] as Tab[]).map((t) => (
+              <button
+                key={t}
+                className={`nav-tab ${tab === t ? "active" : ""}`}
+                onClick={() => setTab(t)}
+              >
+                {t === "trade" ? "Trade" : t === "vault" ? "Vault" : "History"}
+              </button>
+            ))}
+          </nav>
+
+          {/* Wallet */}
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {isConnected && (
+              <div style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                background: "var(--surface-2)",
+                border: "1px solid var(--border)",
+                borderRadius: 8,
+                padding: "5px 12px",
+                fontFamily: "var(--mono)",
+                fontSize: 12,
+                color: "var(--text-2)",
+              }}>
+                <span style={{ color: "var(--text-3)" }}>USDC.e</span>
+                <span style={{ color: "var(--accent)", fontWeight: 600 }}>{usdcDisplay}</span>
+              </div>
+            )}
+            <button
+              style={{
+                background: isConnected ? "var(--surface-2)" : "var(--accent)",
+                border: isConnected ? "1px solid var(--border)" : "none",
+                borderRadius: 8,
+                padding: "7px 16px",
+                fontFamily: "var(--mono)",
+                fontSize: 12,
+                fontWeight: 600,
+                color: isConnected ? "var(--text-2)" : "#000",
+                cursor: "pointer",
+                transition: "all 150ms",
+                minWidth: 140,
+              }}
+              onClick={() => isConnected ? disconnect() : connect()}
+              disabled={isConnecting}
+            >
+              {isConnecting ? "Connecting…" : isConnected ? short : "Connect Wallet"}
+            </button>
+          </div>
         </div>
       </header>
 
-      <section className="grid grid-cols-12 gap-6">
-        <div className="col-span-12 xl:col-span-4 space-y-6">
-          <VaultView />
+      {/* Market banner */}
+      <div style={{
+        background: "linear-gradient(90deg, rgba(0,229,160,0.04), rgba(77,159,255,0.04))",
+        borderBottom: "1px solid var(--border)",
+        padding: "10px 24px",
+      }}>
+        <div style={{ maxWidth: 1400, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-3)", letterSpacing: "0.1em", textTransform: "uppercase" }}>Active Market</span>
+            <span style={{ fontFamily: "var(--sans)", fontSize: 14, fontWeight: 600, color: "var(--text-1)" }}>
+              Will the Iranian regime fall by June 30?
+            </span>
+          </div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-3)" }}>
+            Powered by Polymarket • Polygon Network
+          </div>
         </div>
-        <div className="col-span-12 xl:col-span-5 space-y-6">
-          <TradingView />
-        </div>
-        <div className="col-span-12 xl:col-span-3 space-y-6">
-          <TransactionsView />
-        </div>
-      </section>
-    </main>
+      </div>
+
+      {/* Main content */}
+      <main style={{ maxWidth: 1400, margin: "0 auto", padding: "24px" }}>
+        {tab === "trade" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 20, alignItems: "start" }}>
+            <TradingView />
+            <VaultView />
+          </div>
+        )}
+        {tab === "vault" && <VaultView fullWidth />}
+        {tab === "history" && <TransactionsView />}
+      </main>
+    </div>
   );
 }
-
