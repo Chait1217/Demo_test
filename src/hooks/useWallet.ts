@@ -1,19 +1,21 @@
 "use client";
 
 import { useAccount, useConnect, useDisconnect } from "wagmi";
-import { injected } from "wagmi/connectors";
 
 export function useWallet() {
   const { address, isConnecting, isConnected } = useAccount();
-  const { connect, isPending: isConnectPending } = useConnect();
+  const { connect, connectors, isPending } = useConnect();
   const { disconnect } = useDisconnect();
 
   return {
     address,
     isConnected,
-    isConnecting: isConnecting || isConnectPending,
-    // Create connector inline — never at module scope outside React
-    connect: () => connect({ connector: injected() }),
+    isConnecting: isConnecting || isPending,
+    // Use the first available connector from wagmi config (injected/MetaMask)
+    connect: () => {
+      const connector = connectors[0];
+      if (connector) connect({ connector });
+    },
     disconnect,
   };
 }

@@ -3,15 +3,18 @@
 import { ReactNode, useState } from "react";
 import { WagmiProvider, createConfig, http } from "wagmi";
 import { polygon } from "wagmi/chains";
-import { injected } from "wagmi/connectors";
+import { injected, coinbaseWallet, walletConnect } from "wagmi/connectors";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 function makeConfig() {
   return createConfig({
     chains: [polygon],
-    connectors: [injected()],
+    connectors: [
+      injected(),
+      coinbaseWallet({ appName: "LevMarket" }),
+    ],
     transports: {
-      [polygon.id]: http(),
+      [polygon.id]: http("https://polygon-rpc.com"),
     },
     ssr: true,
   });
@@ -27,4 +30,3 @@ export function WalletProviders({ children }: { children: ReactNode }) {
     </WagmiProvider>
   );
 }
-

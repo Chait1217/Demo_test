@@ -130,9 +130,28 @@ export function TradingView() {
         <div className="card-header">
           <div>
             <div className="metric-label" style={{ marginBottom: 4 }}>Prediction Market</div>
-            <h2 style={{ fontFamily: "var(--sans)", fontSize: 18, fontWeight: 700, color: "var(--text-1)", margin: 0, lineHeight: 1.3 }}>
-              Will the Iranian regime fall by June 30?
-            </h2>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <h2 style={{ fontFamily: "var(--sans)", fontSize: 18, fontWeight: 700, color: "var(--text-1)", margin: 0, lineHeight: 1.3 }}>
+                Will the Iranian regime fall by June 30?
+              </h2>
+              <a
+                href={market?.marketUrl ?? "https://polymarket.com/event/will-the-iranian-regime-fall-by-june-30"}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  fontFamily: "var(--mono)", fontSize: 10, fontWeight: 600,
+                  color: "var(--accent)", textDecoration: "none",
+                  border: "1px solid rgba(0,229,160,0.3)", borderRadius: 6,
+                  padding: "3px 8px", whiteSpace: "nowrap",
+                  transition: "border-color 150ms",
+                }}
+                onMouseEnter={e => (e.currentTarget.style.borderColor = "var(--accent)")}
+                onMouseLeave={e => (e.currentTarget.style.borderColor = "rgba(0,229,160,0.3)")}
+              >
+                ↗ Polymarket
+              </a>
+            </div>
           </div>
           <div className="pill pill-live">LIVE</div>
         </div>
