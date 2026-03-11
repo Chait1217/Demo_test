@@ -23,7 +23,7 @@ const ERC20_ABI = [
 
 export function useUsdcBalance() {
   const { address } = useAccount();
-  // Re-fetch on every new block so balance updates the moment a tx confirms
+  // Watch every new block — balance updates immediately when any tx confirms
   const { data: blockNumber } = useBlockNumber({ watch: true });
 
   const { data: decimalsData } = useReadContract({
@@ -37,12 +37,8 @@ export function useUsdcBalance() {
     abi: ERC20_ABI,
     functionName: "balanceOf",
     args: [address!],
-    query: {
-      enabled: Boolean(address),
-      // blockNumber as part of the query key forces a refetch every block
-    },
-    // re-read on every block
     blockNumber,
+    query: { enabled: Boolean(address) },
   });
 
   if (!balanceData || decimalsData === undefined) {
@@ -50,6 +46,9 @@ export function useUsdcBalance() {
   }
 
   const value = Number(formatUnits(balanceData as bigint, Number(decimalsData)));
-  const display = `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const display = `$${value.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
   return { display, rawBalance: value };
 }

@@ -20,7 +20,7 @@ function saveAll(positions: Position[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(positions));
 }
 
-// Global in-memory list kept in sync with localStorage
+// Module-level cache kept in sync with localStorage
 let _positions: Position[] = [];
 const _listeners = new Set<() => void>();
 
@@ -36,7 +36,9 @@ export function addPosition(p: Position) {
 
 export function closePositionLocal(id: string) {
   _positions = _positions.map((p) =>
-    p.id === id ? { ...p, state: "CLOSED" as const, closedAt: new Date().toISOString() } : p
+    p.id === id
+      ? { ...p, state: "CLOSED" as const, closedAt: new Date().toISOString() }
+      : p
   );
   saveAll(_positions);
   notify();
@@ -46,18 +48,22 @@ export function usePositions() {
   const { address } = useAccount();
   const [, forceRender] = useState(0);
 
-  // Load from localStorage on first mount
   useEffect(() => {
+    // Load from localStorage on mount
     _positions = loadAll();
     forceRender((n) => n + 1);
 
     const listener = () => forceRender((n) => n + 1);
     _listeners.add(listener);
-    return () => { _listeners.delete(listener); };
+    return () => {
+      _listeners.delete(listener);
+    };
   }, []);
 
   const walletPositions = address
-    ? _positions.filter((p) => p.walletAddress.toLowerCase() === address.toLowerCase())
+    ? _positions.filter(
+        (p) => p.walletAddress.toLowerCase() === address.toLowerCase()
+      )
     : [];
 
   const refetch = useCallback(() => {

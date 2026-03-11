@@ -29,12 +29,38 @@ export function useVault(): {
   const { data, isLoading, refetch } = useReadContracts({
     allowFailure: true,
     contracts: [
-      { address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS, abi: leveragedVaultAbi, functionName: "totalAssets" },
-      { address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS, abi: leveragedVaultAbi, functionName: "totalBorrowed" },
-      { address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS, abi: leveragedVaultAbi, functionName: "availableLiquidity" },
-      { address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS, abi: leveragedVaultAbi, functionName: "utilization" },
-      { address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS, abi: leveragedVaultAbi, functionName: "balanceOf", args: [address ?? ZERO_ADDRESS] },
-      { address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS, abi: leveragedVaultAbi, functionName: "maxWithdraw", args: [address ?? ZERO_ADDRESS] },
+      {
+        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
+        abi: leveragedVaultAbi,
+        functionName: "totalAssets",
+      },
+      {
+        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
+        abi: leveragedVaultAbi,
+        functionName: "totalBorrowed",
+      },
+      {
+        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
+        abi: leveragedVaultAbi,
+        functionName: "availableLiquidity",
+      },
+      {
+        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
+        abi: leveragedVaultAbi,
+        functionName: "utilization",
+      },
+      {
+        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
+        abi: leveragedVaultAbi,
+        functionName: "balanceOf",
+        args: [address ?? ZERO_ADDRESS],
+      },
+      {
+        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
+        abi: leveragedVaultAbi,
+        functionName: "maxWithdraw",
+        args: [address ?? ZERO_ADDRESS],
+      },
     ],
     query: { enabled, refetchInterval: 10_000 },
   });
@@ -42,17 +68,19 @@ export function useVault(): {
   if (!enabled || !data) return { snapshot: undefined, isLoading, refetch };
 
   const [tvl, borrowed, available, util, userShare, maxWithdrawRaw] = data;
-  const toNum = (v: any) => (typeof v === "bigint" ? Number(formatUnits(v, 6)) : 0);
-  const utilizationFloat = typeof util?.result === "bigint" ? Number(util.result) / 1e18 : 0;
+  const toNum = (v: any) =>
+    typeof v?.result === "bigint" ? Number(formatUnits(v.result, 6)) : 0;
+  const utilizationFloat =
+    typeof util?.result === "bigint" ? Number(util.result) / 1e18 : 0;
 
   return {
     snapshot: {
-      tvl:           toNum(tvl?.result),
-      totalBorrowed: toNum(borrowed?.result),
-      available:     toNum(available?.result),
+      tvl:           toNum(tvl),
+      totalBorrowed: toNum(borrowed),
+      available:     toNum(available),
       utilization:   utilizationFloat,
-      userShare:     toNum(userShare?.result),
-      maxWithdraw:   toNum(maxWithdrawRaw?.result),
+      userShare:     toNum(userShare),
+      maxWithdraw:   toNum(maxWithdrawRaw),
     },
     isLoading,
     refetch,

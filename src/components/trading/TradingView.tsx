@@ -57,15 +57,15 @@ export function TradingView() {
   const { data: market, isLoading: marketLoading } = useMarket();
   const { rawBalance } = useUsdcBalance();
   const { snapshot } = useVault();
-  const { data: positions, refetch: refetchPositions } = usePositions();
+  const { data: positions } = usePositions();
 
-  const [side, setSide]         = useState<Side | null>(null);
+  const [side, setSide]             = useState<Side | null>(null);
   const [collateral, setCollateral] = useState("");
-  const [leverage, setLeverage] = useState(1);
+  const [leverage, setLeverage]     = useState(1);
   const [submitting, setSubmitting] = useState(false);
-  const [closing, setClosing]   = useState<string | null>(null);
-  const [error, setError]       = useState("");
-  const [success, setSuccess]   = useState("");
+  const [closing, setClosing]       = useState<string | null>(null);
+  const [error, setError]           = useState("");
+  const [success, setSuccess]       = useState("");
 
   const numCollateral = parseFloat(collateral) || 0;
   const utilization   = snapshot?.utilization ?? 0;
@@ -86,13 +86,19 @@ export function TradingView() {
     if (!canTrade || !address || !side) return;
     setError(""); setSuccess(""); setSubmitting(true);
     try {
-      // Generate a local sim ID; try to get a real one from the API
+      // Generate local ID first; try real API to get real orderId
       let orderId = `sim_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       try {
         const res = await fetch("/api/trade/open", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ walletAddress: address, side, collateral: numCollateral, leverage, price: entryPrice }),
+          body: JSON.stringify({
+            walletAddress: address,
+            side,
+            collateral: numCollateral,
+            leverage,
+            price: entryPrice,
+          }),
         });
         if (res.ok) {
           const json = await res.json();
@@ -100,7 +106,7 @@ export function TradingView() {
         }
       } catch { /* API unreachable — use sim ID */ }
 
-      // Save directly to localStorage so Open Positions updates instantly
+      // Write to localStorage immediately — Open Positions renders instantly
       addPosition({
         id: orderId,
         walletAddress: address,
@@ -131,9 +137,9 @@ export function TradingView() {
   async function closePosition(positionId: string, borrowed: number) {
     setClosing(positionId); setError(""); setSuccess("");
     try {
-      // Update localStorage immediately — UI updates instantly
+      // Immediately update localStorage — UI reflects change instantly
       closePositionLocal(positionId);
-      // Notify API best-effort (non-blocking)
+      // Best-effort API call (vault repay + Polymarket cancel)
       fetch("/api/trade/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -150,7 +156,7 @@ export function TradingView() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
-      {/* ── Market Header ───────────────────────────────────────── */}
+      {/* ── Market Header ─────────────────────────────────── */}
       <div className="card" style={{ padding: 20 }}>
         <div className="card-header">
           <div>
@@ -181,8 +187,8 @@ export function TradingView() {
           <div className="pill pill-live">LIVE</div>
         </div>
 
+        {/* YES / NO price panels */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
-          {/* YES panel */}
           <div style={{ background: "var(--surface-2)", border: `1px solid ${side === "YES" ? "var(--yes-color)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
             <div className="metric-label" style={{ color: "var(--yes-color)", marginBottom: 6 }}>YES</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 28, fontWeight: 700, color: "var(--yes-color)" }}>
@@ -191,7 +197,6 @@ export function TradingView() {
             <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", marginTop: 4 }}>Regime falls by June 30</div>
             <MiniChart history={market?.priceHistory ?? []} color="var(--yes-color)" />
           </div>
-          {/* NO panel */}
           <div style={{ background: "var(--surface-2)", border: `1px solid ${side === "NO" ? "var(--no-color)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
             <div className="metric-label" style={{ color: "var(--no-color)", marginBottom: 6 }}>NO</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 28, fontWeight: 700, color: "var(--no-color)" }}>
@@ -202,6 +207,7 @@ export function TradingView() {
           </div>
         </div>
 
+        {/* Market stats */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
           {[
             { label: "24h Volume", value: market?.volume   ? `$${(market.volume   / 1000).toFixed(1)}K` : "—" },
@@ -216,7 +222,7 @@ export function TradingView() {
         </div>
       </div>
 
-      {/* ── Trade Box ──────────────────────────────────────────── */}
+      {/* ── Trade Box ──────────────────────────────────────── */}
       <div className="card" style={{ padding: 20 }}>
         <div className="card-header">
           <div className="metric-label">Open Leveraged Position</div>
@@ -264,19 +270,22 @@ export function TradingView() {
           <div className="metric-label" style={{ marginBottom: 10 }}>Position Summary</div>
           <div style={{ background: "var(--surface-2)", borderRadius: 10, padding: "12px 14px" }}>
             {[
-              { label: "Side",               value: side ? <span className={`tag tag-${side.toLowerCase()}`}>{side}</span> : <span style={{ color: "var(--text-3)" }}>—</span> },
-              { label: "Entry Price",        value: side ? `$${entryPrice.toFixed(4)}` : "—" },
-              { label: "Collateral",         value: numCollateral > 0 ? `$${numCollateral.toFixed(2)}` : "—" },
-              { label: "Borrowed from Vault",value: preview.borrowed > 0 ? <span style={{ color: "var(--warn)" }}>${preview.borrowed.toFixed(2)}</span> : "—" },
-              { label: "Total Position Size",value: preview.notional  > 0 ? <span style={{ color: "var(--text-1)", fontWeight: 600 }}>${preview.notional.toFixed(2)}</span> : "—" },
+              { label: "Side",                value: side ? <span className={`tag tag-${side.toLowerCase()}`}>{side}</span> : <span style={{ color: "var(--text-3)" }}>—</span> },
+              { label: "Entry Price",         value: side ? `$${entryPrice.toFixed(4)}` : "—" },
+              { label: "Collateral",          value: numCollateral > 0 ? `$${numCollateral.toFixed(2)}` : "—" },
+              { label: "Borrowed from Vault", value: preview.borrowed > 0 ? <span style={{ color: "var(--warn)" }}>${preview.borrowed.toFixed(2)}</span> : "—" },
+              { label: "Total Position Size", value: preview.notional  > 0 ? <span style={{ color: "var(--text-1)", fontWeight: 600 }}>${preview.notional.toFixed(2)}</span> : "—" },
             ].map(({ label, value }) => (
-              <div key={label} className="summary-row"><span className="summary-label">{label}</span><span className="summary-value">{value}</span></div>
+              <div key={label} className="summary-row">
+                <span className="summary-label">{label}</span>
+                <span className="summary-value">{value}</span>
+              </div>
             ))}
             <div className="row-divider" style={{ margin: "10px 0" }} />
             {[
-              { label: "Open Fee (0.4%)",      value: preview.notional > 0 ? `$${preview.fees.openFee.toFixed(4)}` : "—" },
-              { label: "Est. Close Fee (0.4%)",value: preview.notional > 0 ? `$${preview.fees.closeFee.toFixed(4)}` : "—" },
-              { label: "Borrow APR",           value: `${(preview.fees.borrowApr * 100).toFixed(1)}%` },
+              { label: "Open Fee (0.4%)",       value: preview.notional > 0 ? `$${preview.fees.openFee.toFixed(4)}` : "—" },
+              { label: "Est. Close Fee (0.4%)", value: preview.notional > 0 ? `$${preview.fees.closeFee.toFixed(4)}` : "—" },
+              { label: "Borrow APR",            value: `${(preview.fees.borrowApr * 100).toFixed(1)}%` },
             ].map(({ label, value }) => (
               <div key={label} className="summary-row">
                 <span className="summary-label">{label}</span>
@@ -286,22 +295,34 @@ export function TradingView() {
           </div>
         </div>
 
-        {insufficientLiquidity && <div className="alert-error" style={{ marginBottom: 12 }}>✕ Vault has insufficient liquidity. Available: ${snapshot?.available.toFixed(2) ?? "0"}.</div>}
+        {insufficientLiquidity && (
+          <div className="alert-error" style={{ marginBottom: 12 }}>
+            ✕ Vault has insufficient liquidity. Available: ${snapshot?.available.toFixed(2) ?? "0"}.
+          </div>
+        )}
         {error   && <div className="alert-error"   style={{ marginBottom: 12 }}>✕ {error}</div>}
         {success && <div className="alert-success" style={{ marginBottom: 12 }}>✓ {success}</div>}
 
         <button className="btn-primary" style={{ width: "100%" }} onClick={submit} disabled={!canTrade}>
-          {!isConnected ? "Connect Wallet to Trade" : !side ? "Select YES or NO" : submitting ? "Opening Position…" : `Open ${side} Position · $${preview.notional.toFixed(2)}`}
+          {!isConnected
+            ? "Connect Wallet to Trade"
+            : !side
+            ? "Select YES or NO"
+            : submitting
+            ? "Opening Position…"
+            : `Open ${side} Position · $${preview.notional.toFixed(2)}`}
         </button>
-        {!isConnected && <p style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-3)", textAlign: "center", marginTop: 8, marginBottom: 0 }}>Any wallet on Polygon network supported</p>}
+        {!isConnected && (
+          <p style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-3)", textAlign: "center", marginTop: 8, marginBottom: 0 }}>
+            Any wallet on Polygon network supported
+          </p>
+        )}
       </div>
 
-      {/* ── Open Positions (always visible) ─────────────────────── */}
+      {/* ── Open Positions ─────────────────────────────────── */}
       <div className="card" style={{ padding: 20 }}>
         <div className="card-header">
-          <div>
-            <div className="metric-label" style={{ marginBottom: 3 }}>Open Positions</div>
-          </div>
+          <div className="metric-label">Open Positions</div>
           <div className={`pill ${openPositions.length > 0 ? "pill-live" : ""}`}>
             {openPositions.length > 0 ? `${openPositions.length} Active` : "None"}
           </div>
@@ -334,7 +355,6 @@ export function TradingView() {
                     {closing === p.id ? "Closing…" : "✕ Close Position"}
                   </button>
                 </div>
-
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
                   {[
                     { label: "Entry",      value: `$${p.entryPrice.toFixed(4)}` },
@@ -348,7 +368,6 @@ export function TradingView() {
                     </div>
                   ))}
                 </div>
-
                 <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>
                     Opened {new Date(p.openedAt).toLocaleString()}
