@@ -6,6 +6,12 @@ export const dynamic = "force-dynamic";
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB  = "https://clob.polymarket.com";
 
+// Primary event/market slug — "Will the Iranian regime fall by June 30?"
+// polymarket.com/event/will-the-iranian-regime-fall-by-june-30
+const PRIMARY_SLUG = "will-the-iranian-regime-fall-by-june-30";
+
+const IRAN_KEYWORDS = ["iranian", "iran regime", "iran fall", "regime fall"];
+
 export interface MarketData {
   question:     string;
   marketUrl:    string;
@@ -21,8 +27,8 @@ export interface MarketData {
 }
 
 const FALLBACK: MarketData = {
-  question:     "Loading market data…",
-  marketUrl:    "https://polymarket.com",
+  question:     "Will the Iranian regime fall by June 30?",
+  marketUrl:    `https://polymarket.com/event/${PRIMARY_SLUG}`,
   yesPrice:     0.5,
   noPrice:      0.5,
   yesTokenId:   "",
@@ -30,7 +36,7 @@ const FALLBACK: MarketData = {
   volume:       0,
   liquidity:    0,
   spread:       0,
-  endDate:      "",
+  endDate:      "2026-06-30",
   priceHistory: [],
 };
 
@@ -42,8 +48,13 @@ let priceExpiry  = 0;
 
 type GammaMarket = Record<string, unknown>;
 
-/** Parse outcomePrices from Gamma API response.
- *  The field is either a JSON string like '["0.65","0.35"]' or an array. */
+function isIranMarket(m: GammaMarket): boolean {
+  const q = ((m.question as string) ?? "").toLowerCase();
+  const s = ((m.slug    as string) ?? "").toLowerCase();
+  return IRAN_KEYWORDS.some((kw) => q.includes(kw) || s.includes(kw));
+}
+
+/** Parse outcomePrices from Gamma API — either JSON string '["0.65","0.35"]' or array */
 function parseOutcomePrices(m: GammaMarket): { yes: number; no: number } | null {
   try {
     const raw = m.outcomePrices;
@@ -51,20 +62,17 @@ function parseOutcomePrices(m: GammaMarket): { yes: number; no: number } | null 
     if (Array.isArray(arr) && arr.length >= 2) {
       const yes = parseFloat(arr[0]);
       const no  = parseFloat(arr[1]);
-      if (isFinite(yes) && isFinite(no) && yes > 0 && no > 0) {
-        return { yes, no };
-      }
+      if (isFinite(yes) && isFinite(no) && yes > 0 && no > 0) return { yes, no };
     }
   } catch { /* ignore */ }
   return null;
 }
 
-/** Resolve token IDs from a Gamma market object. */
+/** Extract YES/NO token IDs from a Gamma market object */
 function parseTokenIds(m: GammaMarket): { yesTokenId: string; noTokenId: string } {
   const tokens: { token_id: string; outcome: string }[] = Array.isArray(m.tokens)
     ? (m.tokens as { token_id: string; outcome: string }[])
     : [];
-  // Also check clobTokenIds (newer API format)
   const clobIds: string[] = Array.isArray(m.clobTokenIds)
     ? (m.clobTokenIds as string[])
     : [];
@@ -72,88 +80,120 @@ function parseTokenIds(m: GammaMarket): { yesTokenId: string; noTokenId: string 
   const yesToken = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
   const noToken  = tokens.find((t) => t.outcome?.toLowerCase() === "no");
 
-  const yesTokenId =
-    yesToken?.token_id ||
-    clobIds[0] ||
-    process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES ||
-    "";
-  const noTokenId =
-    noToken?.token_id ||
-    clobIds[1] ||
-    process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO ||
-    "";
-
-  return { yesTokenId, noTokenId };
+  return {
+    yesTokenId:
+      yesToken?.token_id ||
+      clobIds[0] ||
+      process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES ||
+      "",
+    noTokenId:
+      noToken?.token_id ||
+      clobIds[1] ||
+      process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO ||
+      "",
+  };
 }
 
-/** Find an active binary market.
- *  Strategy:
- *  1. If POLYMARKET_MARKET_SLUG is set, look up that specific slug.
- *  2. Otherwise fetch top active markets sorted by volume and pick the first
- *     binary (yes/no) market with real liquidity.
- */
-async function findMarket(): Promise<GammaMarket | null> {
-  const configuredSlug = process.env.POLYMARKET_MARKET_SLUG?.trim();
+/** Pick the active (non-closed/non-resolved) market from a list */
+function pickActive(markets: GammaMarket[]): GammaMarket | null {
+  // Prefer active + not closed; fall back to any with token IDs
+  return (
+    markets.find((m) => m.active && !m.closed && parseTokenIds(m).yesTokenId) ??
+    markets.find((m) => !m.closed && parseTokenIds(m).yesTokenId) ??
+    markets.find((m) => parseTokenIds(m).yesTokenId) ??
+    markets[0] ??
+    null
+  );
+}
 
-  // 1. Configured slug takes priority
+async function findMarket(): Promise<GammaMarket | null> {
+  // 0. Env-var override
+  const configuredSlug = process.env.POLYMARKET_MARKET_SLUG?.trim();
   if (configuredSlug) {
     try {
       const r = await fetch(`${GAMMA}/markets?slug=${encodeURIComponent(configuredSlug)}`, {
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(6_000),
       });
       if (r.ok) {
         const d = await r.json();
         const m: GammaMarket = Array.isArray(d) ? (d[0] ?? null) : d;
-        if (m?.id) {
-          console.log(`[market] Found configured market: ${m.slug ?? configuredSlug}`);
-          return m;
-        }
+        if (m?.id) { console.log(`[market] Using configured slug: ${configuredSlug}`); return m; }
       }
     } catch { /* fall through */ }
-    console.warn(`[market] Configured slug "${configuredSlug}" not found, searching active markets`);
   }
 
-  // 2. Top active markets by volume (sorted desc, active + not closed)
+  // 1. Events endpoint — most reliable for polymarket.com/event/SLUG URLs
+  try {
+    const r = await fetch(`${GAMMA}/events?slug=${PRIMARY_SLUG}`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      const event: GammaMarket = Array.isArray(d) ? (d[0] ?? null) : d;
+      const markets: GammaMarket[] = (event?.markets as GammaMarket[]) ?? [];
+      const m = pickActive(markets);
+      if (m?.id) { console.log(`[market] Found via events endpoint`); return m; }
+    }
+  } catch { /* continue */ }
+
+  // 2. Direct markets slug lookup
+  try {
+    const r = await fetch(`${GAMMA}/markets?slug=${PRIMARY_SLUG}`, {
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      const m: GammaMarket = Array.isArray(d) ? (d[0] ?? null) : d;
+      if (m?.id) { console.log(`[market] Found via markets slug`); return m; }
+    }
+  } catch { /* continue */ }
+
+  // 3. Keyword search across active markets
   for (const url of [
-    `${GAMMA}/markets?active=true&closed=false&order=volume&ascending=false&limit=20`,
-    `${GAMMA}/markets?active=true&closed=false&order=volume24hr&ascending=false&limit=20`,
-    `${GAMMA}/markets?active=true&limit=50`,
+    `${GAMMA}/markets?active=true&closed=false&limit=200`,
+    `${GAMMA}/markets?limit=500`,
   ]) {
     try {
-      const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-      if (!r.ok) continue;
-      const arr: GammaMarket[] = await r.json();
-      if (!Array.isArray(arr) || arr.length === 0) continue;
-
-      // Pick first market that has binary outcomes (yes/no tokens) and real prices
-      const candidate = arr.find((m) => {
-        const { yesTokenId } = parseTokenIds(m);
-        const prices = parseOutcomePrices(m);
-        return yesTokenId && prices;
-      }) ?? arr[0];
-
-      if (candidate?.id) {
-        console.log(`[market] Using top active market: ${candidate.slug ?? candidate.id}`);
-        return candidate;
+      const r = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+      if (r.ok) {
+        const arr: GammaMarket[] = await r.json();
+        const m = arr.find(isIranMarket);
+        if (m?.id) { console.log(`[market] Found via keyword search`); return m; }
       }
-    } catch { /* try next */ }
+    } catch { /* continue */ }
   }
 
+  // 4. Events search with Iran keywords
+  try {
+    const r = await fetch(`${GAMMA}/events?active=true&limit=100`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (r.ok) {
+      const arr: GammaMarket[] = await r.json();
+      const event = arr.find(isIranMarket);
+      if (event) {
+        const markets: GammaMarket[] = (event.markets as GammaMarket[]) ?? [];
+        const m = pickActive(markets);
+        if (m?.id) { console.log(`[market] Found via events search`); return m; }
+      }
+    }
+  } catch { /* continue */ }
+
+  console.warn("[market] Iran market not found on Polymarket — using fallback");
   return null;
 }
 
-// Fetch market metadata - cached 2 minutes
+// Fetch market metadata — cached 2 minutes
 async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "spread">> {
   const now = Date.now();
   if (cachedMeta && now < metaExpiry) return cachedMeta;
 
   const market = await findMarket();
-
   const { yesTokenId, noTokenId } = market
     ? parseTokenIds(market)
     : { yesTokenId: "", noTokenId: "" };
 
-  // Price history for chart (1 week, hourly)
+  // Price history (1 week, hourly candles)
   let priceHistory: { t: number; p: number }[] = [];
   if (yesTokenId) {
     try {
@@ -171,29 +211,21 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
     } catch { /* ignore */ }
   }
 
-  const slug    = (market?.slug as string) ?? "";
-  const eventSlug = (market?.groupItemTitle as string) ?? slug;
+  const slug = (market?.slug as string) ?? PRIMARY_SLUG;
 
   cachedMeta = {
-    question:
-      (market?.question as string) ?? FALLBACK.question,
-    marketUrl:
-      slug
-        ? `https://polymarket.com/event/${slug}`
-        : "https://polymarket.com",
+    question:  (market?.question as string) ?? FALLBACK.question,
+    marketUrl: `https://polymarket.com/event/${slug}`,
     yesTokenId,
     noTokenId,
     volume:    parseFloat(String(market?.volume24hr ?? market?.volume ?? "0")) || 0,
     liquidity: parseFloat(String(market?.liquidityNum ?? market?.liquidity ?? "0")) || 0,
-    endDate:
-      (market?.endDate as string) ??
-      (market?.end_date_iso as string) ??
-      "",
+    endDate:   (market?.endDate as string) ?? (market?.end_date_iso as string) ?? FALLBACK.endDate,
     priceHistory,
   };
-  metaExpiry = now + 120_000; // 2-minute cache
+  metaExpiry = now + 120_000;
 
-  // Seed prices from Gamma outcomePrices so first response isn't 0.5/0.5
+  // Seed prices immediately from Gamma outcomePrices (no CLOB round-trip needed)
   if (market) {
     const gp = parseOutcomePrices(market);
     if (gp) {
@@ -202,20 +234,15 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
         noPrice:  parseFloat(gp.no.toFixed(4)),
         spread:   0,
       };
-      priceExpiry = now + 30_000; // Gamma prices good for 30s until CLOB refreshes
+      priceExpiry = now + 30_000;
+      console.log(`[market] Gamma prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
     }
-  }
-
-  if (yesTokenId) {
-    console.log(`[market] Market loaded: "${cachedMeta.question.slice(0, 60)}" — YES token: ${yesTokenId.slice(0, 16)}…`);
-  } else {
-    console.warn("[market] No active binary market found on Polymarket — using fallback prices");
   }
 
   return cachedMeta;
 }
 
-// Fetch live bid/ask from CLOB - cached 8 seconds
+// Fetch live bid/ask from CLOB — cached 8 seconds
 async function fetchLivePrices(yesTokenId: string) {
   if (!yesTokenId) return cachedPrices;
   const now = Date.now();
