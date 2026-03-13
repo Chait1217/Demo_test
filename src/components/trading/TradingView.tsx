@@ -13,11 +13,7 @@ type Side = "YES" | "NO";
 function MiniChart({ history, color }: { history: { t: number; p: number }[]; color: string }) {
   const id = color.replace(/[^a-z0-9]/gi, "");
   if (!history || history.length < 2) {
-    return (
-      <div style={{ height: 80, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-3)" }}>Loading chart…</span>
-      </div>
-    );
+    return <div style={{ height: 80 }} />;
   }
   const W = 320, H = 80;
   const prices = history.map((h) => h.p);

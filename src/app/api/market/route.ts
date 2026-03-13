@@ -5,7 +5,6 @@ export const dynamic = "force-dynamic";
 
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB  = "https://clob.polymarket.com";
-const SLUG  = "will-the-iranian-regime-fall-by-june-30";
 
 export interface MarketData {
   question:     string;
@@ -22,8 +21,8 @@ export interface MarketData {
 }
 
 const FALLBACK: MarketData = {
-  question:     "Will the Iranian regime fall by June 30?",
-  marketUrl:    `https://polymarket.com/event/${SLUG}`,
+  question:     "Loading market data…",
+  marketUrl:    "https://polymarket.com",
   yesPrice:     0.5,
   noPrice:      0.5,
   yesTokenId:   "",
@@ -31,7 +30,7 @@ const FALLBACK: MarketData = {
   volume:       0,
   liquidity:    0,
   spread:       0,
-  endDate:      "2025-06-30",
+  endDate:      "",
   priceHistory: [],
 };
 
@@ -41,13 +40,106 @@ let metaExpiry = 0;
 let cachedPrices = { yesPrice: 0.5, noPrice: 0.5, spread: 0 };
 let priceExpiry  = 0;
 
-// Keywords to match against question and slug
-const IRAN_KEYWORDS = ["iranian", "iran regime", "iran fall", "regime fall"];
+type GammaMarket = Record<string, unknown>;
 
-function isIranMarket(m: Record<string, unknown>): boolean {
-  const q = ((m.question as string) ?? "").toLowerCase();
-  const s = ((m.slug    as string) ?? "").toLowerCase();
-  return IRAN_KEYWORDS.some((kw) => q.includes(kw) || s.includes(kw));
+/** Parse outcomePrices from Gamma API response.
+ *  The field is either a JSON string like '["0.65","0.35"]' or an array. */
+function parseOutcomePrices(m: GammaMarket): { yes: number; no: number } | null {
+  try {
+    const raw = m.outcomePrices;
+    const arr: string[] = typeof raw === "string" ? JSON.parse(raw) : (raw as string[]);
+    if (Array.isArray(arr) && arr.length >= 2) {
+      const yes = parseFloat(arr[0]);
+      const no  = parseFloat(arr[1]);
+      if (isFinite(yes) && isFinite(no) && yes > 0 && no > 0) {
+        return { yes, no };
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/** Resolve token IDs from a Gamma market object. */
+function parseTokenIds(m: GammaMarket): { yesTokenId: string; noTokenId: string } {
+  const tokens: { token_id: string; outcome: string }[] = Array.isArray(m.tokens)
+    ? (m.tokens as { token_id: string; outcome: string }[])
+    : [];
+  // Also check clobTokenIds (newer API format)
+  const clobIds: string[] = Array.isArray(m.clobTokenIds)
+    ? (m.clobTokenIds as string[])
+    : [];
+
+  const yesToken = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
+  const noToken  = tokens.find((t) => t.outcome?.toLowerCase() === "no");
+
+  const yesTokenId =
+    yesToken?.token_id ||
+    clobIds[0] ||
+    process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES ||
+    "";
+  const noTokenId =
+    noToken?.token_id ||
+    clobIds[1] ||
+    process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO ||
+    "";
+
+  return { yesTokenId, noTokenId };
+}
+
+/** Find an active binary market.
+ *  Strategy:
+ *  1. If POLYMARKET_MARKET_SLUG is set, look up that specific slug.
+ *  2. Otherwise fetch top active markets sorted by volume and pick the first
+ *     binary (yes/no) market with real liquidity.
+ */
+async function findMarket(): Promise<GammaMarket | null> {
+  const configuredSlug = process.env.POLYMARKET_MARKET_SLUG?.trim();
+
+  // 1. Configured slug takes priority
+  if (configuredSlug) {
+    try {
+      const r = await fetch(`${GAMMA}/markets?slug=${encodeURIComponent(configuredSlug)}`, {
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const m: GammaMarket = Array.isArray(d) ? (d[0] ?? null) : d;
+        if (m?.id) {
+          console.log(`[market] Found configured market: ${m.slug ?? configuredSlug}`);
+          return m;
+        }
+      }
+    } catch { /* fall through */ }
+    console.warn(`[market] Configured slug "${configuredSlug}" not found, searching active markets`);
+  }
+
+  // 2. Top active markets by volume (sorted desc, active + not closed)
+  for (const url of [
+    `${GAMMA}/markets?active=true&closed=false&order=volume&ascending=false&limit=20`,
+    `${GAMMA}/markets?active=true&closed=false&order=volume24hr&ascending=false&limit=20`,
+    `${GAMMA}/markets?active=true&limit=50`,
+  ]) {
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+      if (!r.ok) continue;
+      const arr: GammaMarket[] = await r.json();
+      if (!Array.isArray(arr) || arr.length === 0) continue;
+
+      // Pick first market that has binary outcomes (yes/no tokens) and real prices
+      const candidate = arr.find((m) => {
+        const { yesTokenId } = parseTokenIds(m);
+        const prices = parseOutcomePrices(m);
+        return yesTokenId && prices;
+      }) ?? arr[0];
+
+      if (candidate?.id) {
+        console.log(`[market] Using top active market: ${candidate.slug ?? candidate.id}`);
+        return candidate;
+      }
+    } catch { /* try next */ }
+  }
+
+  return null;
 }
 
 // Fetch market metadata - cached 2 minutes
@@ -55,81 +147,13 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
   const now = Date.now();
   if (cachedMeta && now < metaExpiry) return cachedMeta;
 
-  let market: Record<string, unknown> | null = null;
+  const market = await findMarket();
 
-  // 1. Try exact slug lookup
-  try {
-    const r = await fetch(`${GAMMA}/markets?slug=${SLUG}`, {
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (r.ok) {
-      const d = await r.json();
-      const m = Array.isArray(d) ? (d[0] ?? null) : d;
-      if (m?.id) market = m;
-    }
-  } catch { /* ignore */ }
+  const { yesTokenId, noTokenId } = market
+    ? parseTokenIds(market)
+    : { yesTokenId: "", noTokenId: "" };
 
-  // 2. Try slug variants (with year suffix)
-  if (!market?.id) {
-    for (const variant of [
-      `${SLUG}-2025`,
-      "will-iran-regime-fall-by-june-30",
-      "will-the-iran-regime-fall-by-june-30",
-    ]) {
-      try {
-        const r = await fetch(`${GAMMA}/markets?slug=${variant}`, {
-          signal: AbortSignal.timeout(5_000),
-        });
-        if (r.ok) {
-          const d = await r.json();
-          const m = Array.isArray(d) ? (d[0] ?? null) : d;
-          if (m?.id) { market = m; break; }
-        }
-      } catch { /* ignore */ }
-    }
-  }
-
-  // 3. Keyword search — no active=true filter so we catch all markets
-  if (!market?.id) {
-    try {
-      const r = await fetch(`${GAMMA}/markets?limit=500`, {
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (r.ok) {
-        const arr: Record<string, unknown>[] = await r.json();
-        market = arr.find(isIranMarket) ?? null;
-      }
-    } catch { /* ignore */ }
-  }
-
-  // 4. Try events endpoint as alternative
-  if (!market?.id) {
-    try {
-      const r = await fetch(`${GAMMA}/events?slug=${SLUG}`, {
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (r.ok) {
-        const d = await r.json();
-        const event = Array.isArray(d) ? (d[0] ?? null) : d;
-        // events contain markets array
-        const markets: Record<string, unknown>[] = event?.markets ?? [];
-        market = markets.find(isIranMarket) ?? markets[0] ?? null;
-      }
-    } catch { /* ignore */ }
-  }
-
-  // Parse token IDs
-  const tokens: { token_id: string; outcome: string }[] = Array.isArray(market?.tokens)
-    ? (market!.tokens as { token_id: string; outcome: string }[])
-    : [];
-  const yesToken   = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
-  const noToken    = tokens.find((t) => t.outcome?.toLowerCase() === "no");
-  const yesTokenId =
-    yesToken?.token_id || process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES || "";
-  const noTokenId =
-    noToken?.token_id  || process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO  || "";
-
-  // Price history for chart
+  // Price history for chart (1 week, hourly)
   let priceHistory: { t: number; p: number }[] = [];
   if (yesTokenId) {
     try {
@@ -147,31 +171,51 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
     } catch { /* ignore */ }
   }
 
+  const slug    = (market?.slug as string) ?? "";
+  const eventSlug = (market?.groupItemTitle as string) ?? slug;
+
   cachedMeta = {
     question:
-      (market?.question as string) ?? "Will the Iranian regime fall by June 30?",
-    marketUrl: `https://polymarket.com/event/${(market?.slug as string) ?? SLUG}`,
+      (market?.question as string) ?? FALLBACK.question,
+    marketUrl:
+      slug
+        ? `https://polymarket.com/event/${slug}`
+        : "https://polymarket.com",
     yesTokenId,
     noTokenId,
-    volume:   parseFloat(String(market?.volume24hr ?? market?.volume ?? "0")) || 0,
+    volume:    parseFloat(String(market?.volume24hr ?? market?.volume ?? "0")) || 0,
     liquidity: parseFloat(String(market?.liquidityNum ?? market?.liquidity ?? "0")) || 0,
     endDate:
-      (market?.endDate as string) ?? (market?.end_date_iso as string) ?? "2025-06-30",
+      (market?.endDate as string) ??
+      (market?.end_date_iso as string) ??
+      "",
     priceHistory,
   };
-  metaExpiry = now + 120_000;
+  metaExpiry = now + 120_000; // 2-minute cache
 
-  // Log result for debugging
+  // Seed prices from Gamma outcomePrices so first response isn't 0.5/0.5
+  if (market) {
+    const gp = parseOutcomePrices(market);
+    if (gp) {
+      cachedPrices = {
+        yesPrice: parseFloat(gp.yes.toFixed(4)),
+        noPrice:  parseFloat(gp.no.toFixed(4)),
+        spread:   0,
+      };
+      priceExpiry = now + 30_000; // Gamma prices good for 30s until CLOB refreshes
+    }
+  }
+
   if (yesTokenId) {
-    console.log(`[market] Found Iran market — YES token: ${yesTokenId.slice(0, 16)}…`);
+    console.log(`[market] Market loaded: "${cachedMeta.question.slice(0, 60)}" — YES token: ${yesTokenId.slice(0, 16)}…`);
   } else {
-    console.warn("[market] Iran market not found on Polymarket — using fallback prices");
+    console.warn("[market] No active binary market found on Polymarket — using fallback prices");
   }
 
   return cachedMeta;
 }
 
-// Fetch live prices - cached 8 seconds
+// Fetch live bid/ask from CLOB - cached 8 seconds
 async function fetchLivePrices(yesTokenId: string) {
   if (!yesTokenId) return cachedPrices;
   const now = Date.now();
@@ -194,7 +238,7 @@ async function fetchLivePrices(yesTokenId: string) {
           spread:   parseFloat((ask - bid).toFixed(4)),
         };
         priceExpiry = now + 8_000;
-        console.log(`[market] Live prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
+        console.log(`[market] Live CLOB prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
       }
     }
   } catch { /* keep cached */ }
