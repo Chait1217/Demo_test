@@ -41,6 +41,15 @@ let metaExpiry = 0;
 let cachedPrices = { yesPrice: 0.5, noPrice: 0.5, spread: 0 };
 let priceExpiry  = 0;
 
+// Keywords to match against question and slug
+const IRAN_KEYWORDS = ["iranian", "iran regime", "iran fall", "regime fall"];
+
+function isIranMarket(m: Record<string, unknown>): boolean {
+  const q = ((m.question as string) ?? "").toLowerCase();
+  const s = ((m.slug    as string) ?? "").toLowerCase();
+  return IRAN_KEYWORDS.some((kw) => q.includes(kw) || s.includes(kw));
+}
+
 // Fetch market metadata - cached 2 minutes
 async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "spread">> {
   const now = Date.now();
@@ -48,35 +57,68 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
 
   let market: Record<string, unknown> | null = null;
 
-  // Try slug lookup
+  // 1. Try exact slug lookup
   try {
     const r = await fetch(`${GAMMA}/markets?slug=${SLUG}`, {
       signal: AbortSignal.timeout(8_000),
     });
     if (r.ok) {
       const d = await r.json();
-      market = Array.isArray(d) ? (d[0] ?? null) : d;
+      const m = Array.isArray(d) ? (d[0] ?? null) : d;
+      if (m?.id) market = m;
     }
   } catch { /* ignore */ }
 
-  // Keyword fallback
+  // 2. Try slug variants (with year suffix)
+  if (!market?.id) {
+    for (const variant of [
+      `${SLUG}-2025`,
+      "will-iran-regime-fall-by-june-30",
+      "will-the-iran-regime-fall-by-june-30",
+    ]) {
+      try {
+        const r = await fetch(`${GAMMA}/markets?slug=${variant}`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (r.ok) {
+          const d = await r.json();
+          const m = Array.isArray(d) ? (d[0] ?? null) : d;
+          if (m?.id) { market = m; break; }
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  // 3. Keyword search — no active=true filter so we catch all markets
   if (!market?.id) {
     try {
-      const r = await fetch(`${GAMMA}/markets?limit=200&active=true`, {
-        signal: AbortSignal.timeout(8_000),
+      const r = await fetch(`${GAMMA}/markets?limit=500`, {
+        signal: AbortSignal.timeout(10_000),
       });
       if (r.ok) {
         const arr: Record<string, unknown>[] = await r.json();
-        market =
-          arr.find(
-            (m) =>
-              (m.question as string)?.toLowerCase().includes("iranian") ||
-              (m.slug as string)?.includes("iran")
-          ) ?? null;
+        market = arr.find(isIranMarket) ?? null;
       }
     } catch { /* ignore */ }
   }
 
+  // 4. Try events endpoint as alternative
+  if (!market?.id) {
+    try {
+      const r = await fetch(`${GAMMA}/events?slug=${SLUG}`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const event = Array.isArray(d) ? (d[0] ?? null) : d;
+        // events contain markets array
+        const markets: Record<string, unknown>[] = event?.markets ?? [];
+        market = markets.find(isIranMarket) ?? markets[0] ?? null;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Parse token IDs
   const tokens: { token_id: string; outcome: string }[] = Array.isArray(market?.tokens)
     ? (market!.tokens as { token_id: string; outcome: string }[])
     : [];
@@ -87,6 +129,7 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
   const noTokenId =
     noToken?.token_id  || process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO  || "";
 
+  // Price history for chart
   let priceHistory: { t: number; p: number }[] = [];
   if (yesTokenId) {
     try {
@@ -117,6 +160,14 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
     priceHistory,
   };
   metaExpiry = now + 120_000;
+
+  // Log result for debugging
+  if (yesTokenId) {
+    console.log(`[market] Found Iran market — YES token: ${yesTokenId.slice(0, 16)}…`);
+  } else {
+    console.warn("[market] Iran market not found on Polymarket — using fallback prices");
+  }
+
   return cachedMeta;
 }
 
@@ -143,6 +194,7 @@ async function fetchLivePrices(yesTokenId: string) {
           spread:   parseFloat((ask - bid).toFixed(4)),
         };
         priceExpiry = now + 8_000;
+        console.log(`[market] Live prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
       }
     }
   } catch { /* keep cached */ }
