@@ -98,7 +98,7 @@ export async function POST(req: NextRequest) {
     if (hasVault && preview.borrowed > 0 && process.env.POLYMARKET_PRIVATE_KEY) {
       try {
         const vaultWrite = getVaultWriteContract();
-        const borrowRaw = parseUnits(preview.borrowed.toString(), 6);
+        const borrowRaw = parseUnits(preview.borrowed.toFixed(6), 6);
         await vaultWrite.borrow(borrowRaw);
       } catch (e: any) {
         // Non-fatal: vault borrow may not exist yet; log and continue
