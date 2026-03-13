@@ -1,8 +1,8 @@
 "use client";
 
-import { useAccount, useReadContracts } from "wagmi";
-import { formatUnits } from "viem";
-import { leveragedVaultAbi, leveragedVaultAddress } from "@/lib/vaultAbi";
+import { useAccount } from "wagmi";
+import { useState, useEffect, useCallback } from "react";
+import { simVaultUserBalance, simVaultTVL, subscribeSimState } from "@/lib/simState";
 
 export interface VaultSnapshot {
   tvl: number;
@@ -13,76 +13,34 @@ export interface VaultSnapshot {
   maxWithdraw: number;
 }
 
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
-const hasVault =
-  leveragedVaultAddress &&
-  leveragedVaultAddress.toLowerCase() !== ZERO_ADDRESS;
-
 export function useVault(): {
   snapshot?: VaultSnapshot;
   isLoading: boolean;
   refetch: () => void;
 } {
   const { address } = useAccount();
-  const enabled = Boolean(hasVault && address);
+  const [, rerender] = useState(0);
 
-  const { data, isLoading, refetch } = useReadContracts({
-    allowFailure: true,
-    contracts: [
-      {
-        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
-        abi: leveragedVaultAbi,
-        functionName: "totalAssets",
-      },
-      {
-        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
-        abi: leveragedVaultAbi,
-        functionName: "totalBorrowed",
-      },
-      {
-        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
-        abi: leveragedVaultAbi,
-        functionName: "availableLiquidity",
-      },
-      {
-        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
-        abi: leveragedVaultAbi,
-        functionName: "utilization",
-      },
-      {
-        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
-        abi: leveragedVaultAbi,
-        functionName: "balanceOf",
-        args: [address ?? ZERO_ADDRESS],
-      },
-      {
-        address: hasVault ? leveragedVaultAddress : ZERO_ADDRESS,
-        abi: leveragedVaultAbi,
-        functionName: "maxWithdraw",
-        args: [address ?? ZERO_ADDRESS],
-      },
-    ],
-    query: { enabled, refetchInterval: 10_000 },
-  });
+  // Re-render whenever simState changes (deposit / withdraw)
+  useEffect(() => subscribeSimState(() => rerender((n) => n + 1)), []);
 
-  if (!enabled || !data) return { snapshot: undefined, isLoading, refetch };
+  const refetch = useCallback(() => rerender((n) => n + 1), []);
 
-  const [tvl, borrowed, available, util, userShare, maxWithdrawRaw] = data;
-  const toNum = (v: any) =>
-    typeof v?.result === "bigint" ? Number(formatUnits(v.result, 6)) : 0;
-  const utilizationFloat =
-    typeof util?.result === "bigint" ? Number(util.result) / 1e18 : 0;
+  if (!address) return { snapshot: undefined, isLoading: false, refetch };
+
+  const tvl       = simVaultTVL();
+  const userShare = simVaultUserBalance(address);
 
   return {
     snapshot: {
-      tvl:           toNum(tvl),
-      totalBorrowed: toNum(borrowed),
-      available:     toNum(available),
-      utilization:   utilizationFloat,
-      userShare:     toNum(userShare),
-      maxWithdraw:   toNum(maxWithdrawRaw),
+      tvl,
+      totalBorrowed: 0,
+      available:     tvl,
+      utilization:   0,
+      userShare,
+      maxWithdraw:   userShare,
     },
-    isLoading,
+    isLoading: false,
     refetch,
   };
 }
