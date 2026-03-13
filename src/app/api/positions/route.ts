@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { getPositionsForWallet } from "@/server/positionsStore";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
   const walletAddress = req.nextUrl.searchParams.get("walletAddress");
   if (!walletAddress) {
