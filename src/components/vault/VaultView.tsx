@@ -6,8 +6,11 @@ import {
   useWriteContract,
   useWaitForTransactionReceipt,
   useReadContract,
+  useChainId,
+  useSwitchChain,
 } from "wagmi";
 import { parseUnits, formatUnits } from "viem";
+import { polygon } from "wagmi/chains";
 import { useVault } from "@/hooks/useVault";
 import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { USDCe_ADDRESS } from "@/lib/constants";
@@ -45,6 +48,9 @@ type Phase = "idle" | "approving" | "depositPending" | "done" | "error";
 
 export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
   const { address, isConnected } = useAccount();
+  const chainId = useChainId();
+  const { switchChain, isPending: isSwitching } = useSwitchChain();
+  const isWrongChain = isConnected && chainId !== polygon.id;
   const { snapshot, isLoading, refetch: refetchVault } = useVault();
   const { display: usdcDisplay, rawBalance } = useUsdcBalance();
   const [amount, setAmount] = useState("");
@@ -169,6 +175,19 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
 
       {isConnected ? (
         <div>
+          {isWrongChain && (
+            <div className="alert-error" style={{ marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <span>⚠ Wallet is on the wrong network. Switch to Polygon to deposit.</span>
+              <button
+                className="btn-primary"
+                style={{ padding: "6px 14px", fontSize: 11, whiteSpace: "nowrap" }}
+                disabled={isSwitching}
+                onClick={() => switchChain({ chainId: polygon.id })}
+              >
+                {isSwitching ? "Switching…" : "Switch to Polygon"}
+              </button>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
             {(["deposit", "withdraw"] as const).map((m) => (
               <button key={m} className={`nav-tab ${mode === m ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode(m); reset(); }}>
@@ -198,9 +217,9 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
           )}
 
           {mode === "deposit" ? (
-            <button className="btn-primary" style={{ width: "100%" }} disabled={busy || amountRaw <= 0n} onClick={handleDeposit}>{depositLabel()}</button>
+            <button className="btn-primary" style={{ width: "100%" }} disabled={busy || amountRaw <= 0n || isWrongChain} onClick={handleDeposit}>{depositLabel()}</button>
           ) : (
-            <button className="btn-primary" style={{ width: "100%" }} disabled={busy || amountRaw <= 0n || val > (snapshot?.maxWithdraw ?? 0)} onClick={handleWithdraw}>
+            <button className="btn-primary" style={{ width: "100%" }} disabled={busy || amountRaw <= 0n || val > (snapshot?.maxWithdraw ?? 0) || isWrongChain} onClick={handleWithdraw}>
               {withdrawWalletPending || withdrawConfirming ? "Confirming…" : "Withdraw USDC.e"}
             </button>
           )}

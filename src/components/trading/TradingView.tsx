@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount } from "wagmi";
+import { useAccount, useChainId, useSwitchChain } from "wagmi";
+import { polygon } from "wagmi/chains";
 import { useMarket } from "@/hooks/useMarket";
 import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
@@ -50,10 +51,13 @@ function MiniChart({ history, color }: { history: { t: number; p: number }[]; co
 
 export function TradingView() {
   const { isConnected, address } = useAccount();
+  const chainId = useChainId();
+  const { switchChain, isPending: isSwitching } = useSwitchChain();
+  const isWrongChain = isConnected && chainId !== polygon.id;
   const { data: market, isLoading: marketLoading } = useMarket();
   const { rawBalance } = useUsdcBalance();
   const { snapshot } = useVault();
-  const { data: positions } = usePositions();
+  const { data: positions, refetch: refetchPositions } = usePositions();
 
   const [side, setSide]             = useState<Side | null>(null);
   const [collateral, setCollateral] = useState("");
@@ -76,7 +80,7 @@ export function TradingView() {
   const walletBalanceNum      = rawBalance ?? 0;
   const insufficientBalance   = numCollateral > 0 && numCollateral > walletBalanceNum;
   const insufficientLiquidity = preview.borrowed > 0 && snapshot && preview.borrowed > snapshot.available;
-  const canTrade = isConnected && !!side && numCollateral > 0 && !insufficientBalance && !insufficientLiquidity && !submitting;
+  const canTrade = isConnected && !isWrongChain && !!side && numCollateral > 0 && !insufficientBalance && !insufficientLiquidity && !submitting;
 
   async function submit() {
     if (!canTrade || !address || !side) return;
@@ -120,6 +124,9 @@ export function TradingView() {
         state: "OPEN",
         openedAt: new Date().toISOString(),
       });
+
+      // Force a re-read from localStorage so the positions list is always in sync
+      refetchPositions();
 
       setSuccess(`Position opened · ID: ${orderId}`);
       setCollateral(""); setLeverage(1); setSide(null);
@@ -291,9 +298,22 @@ export function TradingView() {
           </div>
         </div>
 
+        {isWrongChain && (
+          <div className="alert-error" style={{ marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <span>⚠ Switch to Polygon to trade.</span>
+            <button
+              className="btn-primary"
+              style={{ padding: "6px 14px", fontSize: 11, whiteSpace: "nowrap" }}
+              disabled={isSwitching}
+              onClick={() => switchChain({ chainId: polygon.id })}
+            >
+              {isSwitching ? "Switching…" : "Switch to Polygon"}
+            </button>
+          </div>
+        )}
         {insufficientLiquidity && (
           <div className="alert-error" style={{ marginBottom: 12 }}>
-            ✕ Vault has insufficient liquidity. Available: ${snapshot?.available.toFixed(2) ?? "0"}.
+            ✕ Vault has insufficient liquidity. Available: ${snapshot?.available.toFixed(2) ?? "0"}. Deposit into the vault first.
           </div>
         )}
         {error   && <div className="alert-error"   style={{ marginBottom: 12 }}>✕ {error}</div>}
@@ -302,6 +322,8 @@ export function TradingView() {
         <button className="btn-primary" style={{ width: "100%" }} onClick={submit} disabled={!canTrade}>
           {!isConnected
             ? "Connect Wallet to Trade"
+            : isWrongChain
+            ? "Wrong Network — Switch to Polygon"
             : !side
             ? "Select YES or NO"
             : submitting

@@ -8,9 +8,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // Multiple public Polygon RPC endpoints for reliability
 const polygonTransport = fallback([
+  http("https://polygon-bor-rpc.publicnode.com"),
+  http("https://rpc.ankr.com/polygon"),
   http("https://polygon-rpc.com"),
   http("https://rpc-mainnet.matic.quiknode.pro"),
-  http("https://matic-mainnet.chainstacklabs.com"),
 ]);
 
 function makeConfig() {
