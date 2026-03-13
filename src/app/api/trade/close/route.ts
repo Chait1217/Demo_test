@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
     if (hasVault && repayAmount && repayAmount > 0 && process.env.POLYMARKET_PRIVATE_KEY) {
       try {
         const vault = getVaultWriteContract();
-        const raw = parseUnits(repayAmount.toString(), 6);
+        const raw = parseUnits(repayAmount.toFixed(6), 6);
         await vault.repay(raw);
       } catch (e: any) {
         console.warn("Vault repay failed (non-fatal):", e.message);
