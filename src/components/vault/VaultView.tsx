@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   useAccount,
   useWriteContract,
@@ -12,6 +12,18 @@ import { useVault } from "@/hooks/useVault";
 import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { USDCe_ADDRESS } from "@/lib/constants";
 import { leveragedVaultAbi, leveragedVaultAddress } from "@/lib/vaultAbi";
+
+/** Parse amount string directly to avoid float precision loss */
+function safeParseAmount(s: string): bigint {
+  if (!s || !s.trim()) return 0n;
+  try {
+    const [int, dec = ""] = s.trim().split(".");
+    const truncated = dec.length > 6 ? `${int}.${dec.slice(0, 6)}` : s.trim();
+    return parseUnits(truncated, 6);
+  } catch {
+    return 0n;
+  }
+}
 
 const ZERO = "0x0000000000000000000000000000000000000000" as `0x${string}`;
 const hasVault = leveragedVaultAddress && leveragedVaultAddress.toLowerCase() !== ZERO;
@@ -41,7 +53,9 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
   const [errMsg, setErrMsg] = useState("");
 
   const val      = parseFloat(amount) || 0;
-  const amountRaw = val > 0 ? parseUnits(val.toFixed(6), 6) : 0n;
+  const amountRaw = safeParseAmount(amount);
+  const amountRawRef = useRef(0n);
+  amountRawRef.current = amountRaw;
 
   const { data: allowanceData, refetch: refetchAllowance } = useReadContract({
     address: USDCe_ADDRESS, abi: ERC20_ABI, functionName: "allowance",
@@ -59,12 +73,15 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
   const { isLoading: depositConfirming, isSuccess: depositConfirmed } = useWaitForTransactionReceipt({ hash: depositTxHash });
   const { isLoading: withdrawConfirming, isSuccess: withdrawConfirmed } = useWaitForTransactionReceipt({ hash: withdrawTxHash });
 
-  // Approval confirmed → fire deposit automatically
+  // Approval confirmed → fire deposit automatically (use ref to avoid stale closure)
   useEffect(() => {
-    if (approveConfirmed && phase === "approving" && address && amountRaw > 0n) {
-      refetchAllowance();
-      setPhase("depositPending");
-      sendDeposit({ address: leveragedVaultAddress, abi: leveragedVaultAbi, functionName: "deposit", args: [amountRaw, address] });
+    if (approveConfirmed && phase === "approving" && address) {
+      const raw = amountRawRef.current;
+      if (raw > 0n) {
+        refetchAllowance();
+        setPhase("depositPending");
+        sendDeposit({ address: leveragedVaultAddress, abi: leveragedVaultAbi, functionName: "deposit", args: [raw, address] });
+      }
     }
   }, [approveConfirmed]); // eslint-disable-line
 
@@ -82,8 +99,8 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
   }, [approveError, depositError, withdrawError]);
 
   function handleDeposit() {
-    if (!address || val <= 0 || !hasVault) return;
-    setErrMsg(""); resetApprove(); resetDeposit();
+    if (!address || amountRaw <= 0n || !hasVault) return;
+    setErrMsg(""); resetApprove(); resetDeposit(); resetWithdraw();
     if (needsApproval) {
       setPhase("approving");
       sendApprove({ address: USDCe_ADDRESS, abi: ERC20_ABI, functionName: "approve", args: [leveragedVaultAddress, amountRaw] });
@@ -94,8 +111,8 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
   }
 
   function handleWithdraw() {
-    if (!address || val <= 0 || !hasVault) return;
-    setErrMsg(""); resetWithdraw(); setPhase("idle");
+    if (!address || amountRaw <= 0n || !hasVault) return;
+    setErrMsg(""); resetApprove(); resetDeposit(); resetWithdraw(); setPhase("idle");
     sendWithdraw({ address: leveragedVaultAddress, abi: leveragedVaultAbi, functionName: "withdraw", args: [amountRaw, address, address] });
   }
 
@@ -181,9 +198,9 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
           )}
 
           {mode === "deposit" ? (
-            <button className="btn-primary" style={{ width: "100%" }} disabled={busy || val <= 0} onClick={handleDeposit}>{depositLabel()}</button>
+            <button className="btn-primary" style={{ width: "100%" }} disabled={busy || amountRaw <= 0n} onClick={handleDeposit}>{depositLabel()}</button>
           ) : (
-            <button className="btn-primary" style={{ width: "100%" }} disabled={busy || val <= 0 || val > (snapshot?.maxWithdraw ?? 0)} onClick={handleWithdraw}>
+            <button className="btn-primary" style={{ width: "100%" }} disabled={busy || amountRaw <= 0n || val > (snapshot?.maxWithdraw ?? 0)} onClick={handleWithdraw}>
               {withdrawWalletPending || withdrawConfirming ? "Confirming…" : "Withdraw USDC.e"}
             </button>
           )}

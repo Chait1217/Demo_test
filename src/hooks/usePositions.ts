@@ -60,6 +60,28 @@ export function usePositions() {
     };
   }, []);
 
+  // Merge server-side positions (in case localStorage was cleared or user is in a new tab)
+  useEffect(() => {
+    if (!address) return;
+    fetch(`/api/positions?walletAddress=${encodeURIComponent(address)}`)
+      .then((r) => r.ok ? r.json() : [])
+      .then((serverPositions: Position[]) => {
+        if (!serverPositions.length) return;
+        const local = loadAll();
+        const localIds = new Set(local.map((p) => p.id));
+        const merged = [
+          ...local,
+          ...serverPositions.filter((p) => !localIds.has(p.id)),
+        ];
+        if (merged.length > local.length) {
+          saveAll(merged);
+          _positions = merged;
+          notify();
+        }
+      })
+      .catch(() => { /* server may not have positions, ignore */ });
+  }, [address]);
+
   const walletPositions = address
     ? _positions.filter(
         (p) => p.walletAddress.toLowerCase() === address.toLowerCase()

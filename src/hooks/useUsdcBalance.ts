@@ -38,7 +38,12 @@ export function useUsdcBalance() {
     functionName: "balanceOf",
     args: [address!],
     blockNumber,
-    query: { enabled: Boolean(address) },
+    query: {
+      enabled: Boolean(address),
+      // Keep showing the previous balance while the new block's value loads,
+      // preventing the 0 → real value flicker on every block.
+      placeholderData: (prev: unknown) => prev,
+    },
   });
 
   if (!balanceData || decimalsData === undefined) {

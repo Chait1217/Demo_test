@@ -5,7 +5,12 @@ export const dynamic = "force-dynamic";
 
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB  = "https://clob.polymarket.com";
-const SLUG  = "will-the-iranian-regime-fall-by-june-30";
+
+// Primary event/market slug — "Will the Iranian regime fall by June 30?"
+// polymarket.com/event/will-the-iranian-regime-fall-by-june-30
+const PRIMARY_SLUG = "will-the-iranian-regime-fall-by-june-30";
+
+const IRAN_KEYWORDS = ["iranian", "iran regime", "iran fall", "regime fall"];
 
 export interface MarketData {
   question:     string;
@@ -23,7 +28,7 @@ export interface MarketData {
 
 const FALLBACK: MarketData = {
   question:     "Will the Iranian regime fall by June 30?",
-  marketUrl:    `https://polymarket.com/event/${SLUG}`,
+  marketUrl:    `https://polymarket.com/event/${PRIMARY_SLUG}`,
   yesPrice:     0.5,
   noPrice:      0.5,
   yesTokenId:   "",
@@ -31,7 +36,7 @@ const FALLBACK: MarketData = {
   volume:       0,
   liquidity:    0,
   spread:       0,
-  endDate:      "2025-06-30",
+  endDate:      "2026-06-30",
   priceHistory: [],
 };
 
@@ -41,52 +46,154 @@ let metaExpiry = 0;
 let cachedPrices = { yesPrice: 0.5, noPrice: 0.5, spread: 0 };
 let priceExpiry  = 0;
 
-// Fetch market metadata - cached 2 minutes
-async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "spread">> {
-  const now = Date.now();
-  if (cachedMeta && now < metaExpiry) return cachedMeta;
+type GammaMarket = Record<string, unknown>;
 
-  let market: Record<string, unknown> | null = null;
+function isIranMarket(m: GammaMarket): boolean {
+  const q = ((m.question as string) ?? "").toLowerCase();
+  const s = ((m.slug    as string) ?? "").toLowerCase();
+  return IRAN_KEYWORDS.some((kw) => q.includes(kw) || s.includes(kw));
+}
 
-  // Try slug lookup
+/** Parse outcomePrices from Gamma API — either JSON string '["0.65","0.35"]' or array */
+function parseOutcomePrices(m: GammaMarket): { yes: number; no: number } | null {
   try {
-    const r = await fetch(`${GAMMA}/markets?slug=${SLUG}`, {
+    const raw = m.outcomePrices;
+    const arr: string[] = typeof raw === "string" ? JSON.parse(raw) : (raw as string[]);
+    if (Array.isArray(arr) && arr.length >= 2) {
+      const yes = parseFloat(arr[0]);
+      const no  = parseFloat(arr[1]);
+      if (isFinite(yes) && isFinite(no) && yes > 0 && no > 0) return { yes, no };
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/** Extract YES/NO token IDs from a Gamma market object */
+function parseTokenIds(m: GammaMarket): { yesTokenId: string; noTokenId: string } {
+  const tokens: { token_id: string; outcome: string }[] = Array.isArray(m.tokens)
+    ? (m.tokens as { token_id: string; outcome: string }[])
+    : [];
+  const clobIds: string[] = Array.isArray(m.clobTokenIds)
+    ? (m.clobTokenIds as string[])
+    : [];
+
+  const yesToken = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
+  const noToken  = tokens.find((t) => t.outcome?.toLowerCase() === "no");
+
+  return {
+    yesTokenId:
+      yesToken?.token_id ||
+      clobIds[0] ||
+      process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES ||
+      "",
+    noTokenId:
+      noToken?.token_id ||
+      clobIds[1] ||
+      process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO ||
+      "",
+  };
+}
+
+/** Pick the active (non-closed/non-resolved) market from a list */
+function pickActive(markets: GammaMarket[]): GammaMarket | null {
+  // Prefer active + not closed; fall back to any with token IDs
+  return (
+    markets.find((m) => m.active && !m.closed && parseTokenIds(m).yesTokenId) ??
+    markets.find((m) => !m.closed && parseTokenIds(m).yesTokenId) ??
+    markets.find((m) => parseTokenIds(m).yesTokenId) ??
+    markets[0] ??
+    null
+  );
+}
+
+async function findMarket(): Promise<GammaMarket | null> {
+  // 0. Env-var override
+  const configuredSlug = process.env.POLYMARKET_MARKET_SLUG?.trim();
+  if (configuredSlug) {
+    try {
+      const r = await fetch(`${GAMMA}/markets?slug=${encodeURIComponent(configuredSlug)}`, {
+        signal: AbortSignal.timeout(6_000),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const m: GammaMarket = Array.isArray(d) ? (d[0] ?? null) : d;
+        if (m?.id) { console.log(`[market] Using configured slug: ${configuredSlug}`); return m; }
+      }
+    } catch { /* fall through */ }
+  }
+
+  // 1. Events endpoint — most reliable for polymarket.com/event/SLUG URLs
+  try {
+    const r = await fetch(`${GAMMA}/events?slug=${PRIMARY_SLUG}`, {
       signal: AbortSignal.timeout(8_000),
     });
     if (r.ok) {
       const d = await r.json();
-      market = Array.isArray(d) ? (d[0] ?? null) : d;
+      const event: GammaMarket = Array.isArray(d) ? (d[0] ?? null) : d;
+      const markets: GammaMarket[] = (event?.markets as GammaMarket[]) ?? [];
+      const m = pickActive(markets);
+      if (m?.id) { console.log(`[market] Found via events endpoint`); return m; }
     }
-  } catch { /* ignore */ }
+  } catch { /* continue */ }
 
-  // Keyword fallback
-  if (!market?.id) {
+  // 2. Direct markets slug lookup
+  try {
+    const r = await fetch(`${GAMMA}/markets?slug=${PRIMARY_SLUG}`, {
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      const m: GammaMarket = Array.isArray(d) ? (d[0] ?? null) : d;
+      if (m?.id) { console.log(`[market] Found via markets slug`); return m; }
+    }
+  } catch { /* continue */ }
+
+  // 3. Keyword search across active markets
+  for (const url of [
+    `${GAMMA}/markets?active=true&closed=false&limit=200`,
+    `${GAMMA}/markets?limit=500`,
+  ]) {
     try {
-      const r = await fetch(`${GAMMA}/markets?limit=200&active=true`, {
-        signal: AbortSignal.timeout(8_000),
-      });
+      const r = await fetch(url, { signal: AbortSignal.timeout(12_000) });
       if (r.ok) {
-        const arr: Record<string, unknown>[] = await r.json();
-        market =
-          arr.find(
-            (m) =>
-              (m.question as string)?.toLowerCase().includes("iranian") ||
-              (m.slug as string)?.includes("iran")
-          ) ?? null;
+        const arr: GammaMarket[] = await r.json();
+        const m = arr.find(isIranMarket);
+        if (m?.id) { console.log(`[market] Found via keyword search`); return m; }
       }
-    } catch { /* ignore */ }
+    } catch { /* continue */ }
   }
 
-  const tokens: { token_id: string; outcome: string }[] = Array.isArray(market?.tokens)
-    ? (market!.tokens as { token_id: string; outcome: string }[])
-    : [];
-  const yesToken   = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
-  const noToken    = tokens.find((t) => t.outcome?.toLowerCase() === "no");
-  const yesTokenId =
-    yesToken?.token_id || process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES || "";
-  const noTokenId =
-    noToken?.token_id  || process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO  || "";
+  // 4. Events search with Iran keywords
+  try {
+    const r = await fetch(`${GAMMA}/events?active=true&limit=100`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (r.ok) {
+      const arr: GammaMarket[] = await r.json();
+      const event = arr.find(isIranMarket);
+      if (event) {
+        const markets: GammaMarket[] = (event.markets as GammaMarket[]) ?? [];
+        const m = pickActive(markets);
+        if (m?.id) { console.log(`[market] Found via events search`); return m; }
+      }
+    }
+  } catch { /* continue */ }
 
+  console.warn("[market] Iran market not found on Polymarket — using fallback");
+  return null;
+}
+
+// Fetch market metadata — cached 2 minutes
+async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "spread">> {
+  const now = Date.now();
+  if (cachedMeta && now < metaExpiry) return cachedMeta;
+
+  const market = await findMarket();
+  const { yesTokenId, noTokenId } = market
+    ? parseTokenIds(market)
+    : { yesTokenId: "", noTokenId: "" };
+
+  // Price history (1 week, hourly candles)
   let priceHistory: { t: number; p: number }[] = [];
   if (yesTokenId) {
     try {
@@ -104,23 +211,38 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
     } catch { /* ignore */ }
   }
 
+  const slug = (market?.slug as string) ?? PRIMARY_SLUG;
+
   cachedMeta = {
-    question:
-      (market?.question as string) ?? "Will the Iranian regime fall by June 30?",
-    marketUrl: `https://polymarket.com/event/${(market?.slug as string) ?? SLUG}`,
+    question:  (market?.question as string) ?? FALLBACK.question,
+    marketUrl: `https://polymarket.com/event/${slug}`,
     yesTokenId,
     noTokenId,
-    volume:   parseFloat(String(market?.volume24hr ?? market?.volume ?? "0")) || 0,
+    volume:    parseFloat(String(market?.volume24hr ?? market?.volume ?? "0")) || 0,
     liquidity: parseFloat(String(market?.liquidityNum ?? market?.liquidity ?? "0")) || 0,
-    endDate:
-      (market?.endDate as string) ?? (market?.end_date_iso as string) ?? "2025-06-30",
+    endDate:   (market?.endDate as string) ?? (market?.end_date_iso as string) ?? FALLBACK.endDate,
     priceHistory,
   };
   metaExpiry = now + 120_000;
+
+  // Seed prices immediately from Gamma outcomePrices (no CLOB round-trip needed)
+  if (market) {
+    const gp = parseOutcomePrices(market);
+    if (gp) {
+      cachedPrices = {
+        yesPrice: parseFloat(gp.yes.toFixed(4)),
+        noPrice:  parseFloat(gp.no.toFixed(4)),
+        spread:   0,
+      };
+      priceExpiry = now + 30_000;
+      console.log(`[market] Gamma prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
+    }
+  }
+
   return cachedMeta;
 }
 
-// Fetch live prices - cached 8 seconds
+// Fetch live bid/ask from CLOB — cached 8 seconds
 async function fetchLivePrices(yesTokenId: string) {
   if (!yesTokenId) return cachedPrices;
   const now = Date.now();
@@ -143,6 +265,7 @@ async function fetchLivePrices(yesTokenId: string) {
           spread:   parseFloat((ask - bid).toFixed(4)),
         };
         priceExpiry = now + 8_000;
+        console.log(`[market] Live CLOB prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
       }
     }
   } catch { /* keep cached */ }
