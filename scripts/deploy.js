@@ -108,7 +108,11 @@ async function main() {
   const factory  = new ethers.ContractFactory(abi, bytecode, wallet);
   const vault    = await factory.deploy(
     USDCe_ADDRESS,  // _asset  (USDC.e on Polygon)
-    wallet.address  // _owner
+    wallet.address, // _owner
+    {
+      maxPriorityFeePerGas: ethers.utils.parseUnits("35", "gwei"),
+      maxFeePerGas:         ethers.utils.parseUnits("150", "gwei"),
+    }
   );
 
   console.log("Transaction sent:", vault.deployTransaction.hash);
