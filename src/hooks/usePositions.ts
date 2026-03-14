@@ -60,6 +60,14 @@ export function usePositions() {
     };
   }, []);
 
+  // Re-read localStorage whenever the wallet address changes so that previously
+  // stored positions are visible immediately after reconnecting.
+  useEffect(() => {
+    if (!address) return;
+    _positions = loadAll();
+    forceRender((n) => n + 1);
+  }, [address]);
+
   // Merge server-side positions (in case localStorage was cleared or user is in a new tab)
   useEffect(() => {
     if (!address) return;

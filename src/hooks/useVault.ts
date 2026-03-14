@@ -21,12 +21,13 @@ const hasVault =
 export function useVault(): {
   snapshot?: VaultSnapshot;
   isLoading: boolean;
+  isDeployed: boolean;
   refetch: () => void;
 } {
   const { address } = useAccount();
   const enabled = Boolean(hasVault && address);
 
-  const { data, isLoading, refetch } = useReadContracts({
+  const { data, isLoading, refetch, isError } = useReadContracts({
     allowFailure: true,
     contracts: [
       {
@@ -65,9 +66,14 @@ export function useVault(): {
     query: { enabled, refetchInterval: 10_000 },
   });
 
-  if (!enabled || !data) return { snapshot: undefined, isLoading, refetch };
+  if (!enabled || !data) return { snapshot: undefined, isLoading, isDeployed: false, refetch };
 
   const [tvl, borrowed, available, util, userShare, maxWithdrawRaw] = data;
+
+  // If every call errored, the contract is not deployed at this address.
+  const allFailed = data.every((d) => d.error && !d.result);
+  const isDeployed = !allFailed;
+
   const toNum = (v: any) =>
     typeof v?.result === "bigint" ? Number(formatUnits(v.result, 6)) : 0;
   const utilizationFloat =
@@ -83,6 +89,7 @@ export function useVault(): {
       maxWithdraw:   toNum(maxWithdrawRaw),
     },
     isLoading,
+    isDeployed,
     refetch,
   };
 }

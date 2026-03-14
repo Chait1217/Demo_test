@@ -27,7 +27,10 @@ const ERC20_ABI = [
 
 const publicClient = createPublicClient({
   chain: POLYGON_CHAIN,
-  transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com"),
+  transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com", {
+    timeout: 5_000,
+    retryCount: 0,
+  }),
 });
 
 function getVaultWriteContract() {
@@ -54,16 +57,7 @@ export async function POST(req: NextRequest) {
       return new Response("Invalid trade payload", { status: 400 });
     }
 
-    // 1. Check wallet USDC.e balance
-    const [decimals, rawBalance] = await Promise.all([
-      publicClient.readContract({ address: USDCe_ADDRESS, abi: ERC20_ABI, functionName: "decimals" }),
-      publicClient.readContract({ address: USDCe_ADDRESS, abi: ERC20_ABI, functionName: "balanceOf", args: [walletAddress as Address] }),
-    ]);
-
-    const balance = Number(formatUnits(rawBalance as bigint, decimals as number));
-    if (balance < collateral) {
-      return new Response(`Insufficient USDC.e balance. Wallet has $${balance.toFixed(2)}, need $${collateral.toFixed(2)}.`, { status: 400 });
-    }
+    const raceTimeout = (ms: number) => new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms));
 
     // 2. Check vault liquidity
     const ZERO = "0x0000000000000000000000000000000000000000" as Address;
@@ -71,21 +65,40 @@ export async function POST(req: NextRequest) {
 
     let utilization = 0;
     let available = 999999;
+    let insufficientBalance = false;
 
-    if (hasVault) {
-      try {
-        const [availableRaw, tvlRaw, borrowedRaw] = await Promise.all([
+    // Run balance check + vault check in parallel with a shared 4s deadline
+    await Promise.all([
+      // 1. Wallet USDC.e balance check
+      Promise.race([
+        Promise.all([
+          publicClient.readContract({ address: USDCe_ADDRESS, abi: ERC20_ABI, functionName: "decimals" }),
+          publicClient.readContract({ address: USDCe_ADDRESS, abi: ERC20_ABI, functionName: "balanceOf", args: [walletAddress as Address] }),
+        ]).then(([decimals, rawBalance]) => {
+          const balance = Number(formatUnits(rawBalance as bigint, decimals as number));
+          if (balance < collateral) insufficientBalance = true;
+        }),
+        raceTimeout(4_000),
+      ]).catch(() => { /* RPC unavailable — skip, client already validated */ }),
+
+      // 2. Vault liquidity check
+      !hasVault ? Promise.resolve() : Promise.race([
+        Promise.all([
           publicClient.readContract({ address: VAULT_ADDRESS, abi: leveragedVaultAbi, functionName: "availableLiquidity" }),
           publicClient.readContract({ address: VAULT_ADDRESS, abi: leveragedVaultAbi, functionName: "totalAssets" }),
           publicClient.readContract({ address: VAULT_ADDRESS, abi: leveragedVaultAbi, functionName: "totalBorrowed" }),
-        ]);
-        available = Number(formatUnits(availableRaw as bigint, 6));
-        const tvl = Number(formatUnits(tvlRaw as bigint, 6));
-        const borrowed = Number(formatUnits(borrowedRaw as bigint, 6));
-        utilization = tvl === 0 ? 0 : borrowed / tvl;
-      } catch {
-        // vault may not have all functions, use defaults
-      }
+        ]).then(([availableRaw, tvlRaw, borrowedRaw]) => {
+          available = Number(formatUnits(availableRaw as bigint, 6));
+          const tvl = Number(formatUnits(tvlRaw as bigint, 6));
+          const borrowed = Number(formatUnits(borrowedRaw as bigint, 6));
+          utilization = tvl === 0 ? 0 : borrowed / tvl;
+        }),
+        raceTimeout(4_000),
+      ]).catch(() => { /* vault unavailable, use defaults */ }),
+    ]);
+
+    if (insufficientBalance) {
+      return new Response(`Insufficient USDC.e balance. Need $${collateral.toFixed(2)}.`, { status: 400 });
     }
 
     const preview = computePositionPreview({ collateral, leverage }, utilization);
