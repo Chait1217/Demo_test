@@ -1,13 +1,19 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount, useChainId, useSwitchChain, useSignTypedData } from "wagmi";
+import { useAccount, useChainId, useSwitchChain, useSignTypedData, usePublicClient, useWriteContract } from "wagmi";
 import { polygon } from "wagmi/chains";
 import { useMarket } from "@/hooks/useMarket";
 import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
 import { usePositions, addPosition, closePositionLocal } from "@/hooks/usePositions";
 import { computePositionPreview } from "@/lib/leverage";
+import { USDCe_ADDRESS } from "@/lib/constants";
+
+const ERC20_APPROVE_ABI = [
+  { name: "allowance", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
+  { name: "approve",   type: "function", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "amount",  type: "uint256" }], outputs: [{ name: "", type: "bool"    }] },
+] as const;
 
 type Side = "YES" | "NO";
 
@@ -59,7 +65,9 @@ export function TradingView() {
   const { snapshot, isDeployed: vaultDeployed } = useVault();
   const { data: positions, refetch: refetchPositions } = usePositions();
 
-  const { signTypedDataAsync } = useSignTypedData();
+  const { signTypedDataAsync }          = useSignTypedData();
+  const publicClient                    = usePublicClient();
+  const { writeContractAsync }          = useWriteContract();
 
   const [side, setSide]             = useState<Side | null>(null);
   const [collateral, setCollateral] = useState("");
@@ -99,7 +107,29 @@ export function TradingView() {
       if (!prepRes.ok) throw new Error(await prepRes.text() || `Prepare error ${prepRes.status}`);
       const { orderStruct, exchangeAddress, l1Timestamp, l1Nonce } = await prepRes.json();
 
-      // ── Step 2: Sign the Polymarket L1 auth message (wallet popup #1) ─────
+      // ── Step 2: Ensure USDC.e allowance for the CTF Exchange ─────────────
+      setSubmitStep("Checking USDC.e allowance…");
+      const needed = BigInt(orderStruct.makerAmount as string);
+      const currentAllowance = await publicClient!.readContract({
+        address:      USDCe_ADDRESS,
+        abi:          ERC20_APPROVE_ABI,
+        functionName: "allowance",
+        args:         [address, exchangeAddress as `0x${string}`],
+      }) as bigint;
+
+      if (currentAllowance < needed) {
+        setSubmitStep("Approve USDC.e spend… (wallet prompt)");
+        const approveTx = await writeContractAsync({
+          address:      USDCe_ADDRESS,
+          abi:          ERC20_APPROVE_ABI,
+          functionName: "approve",
+          args:         [exchangeAddress as `0x${string}`, BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")],
+        });
+        setSubmitStep("Waiting for approval confirmation…");
+        await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+      }
+
+      // ── Step 3: Sign the Polymarket L1 auth message (wallet popup #1) ─────
       setSubmitStep("Sign to authenticate with Polymarket… (1/2)");
       const l1Signature = await signTypedDataAsync({
         domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
@@ -120,7 +150,7 @@ export function TradingView() {
         },
       });
 
-      // ── Step 3: Sign the order itself (wallet popup #2) ───────────────────
+      // ── Step 4: Sign the order itself (wallet popup #2) ───────────────────
       setSubmitStep("Sign to authorise this trade… (2/2)");
       const orderSignature = await signTypedDataAsync({
         domain: {
@@ -162,7 +192,7 @@ export function TradingView() {
         },
       });
 
-      // ── Step 4: Submit to CLOB via server (derives API creds + posts order) ─
+      // ── Step 5: Submit to CLOB via server (derives API creds + posts order) ─
       setSubmitStep("Submitting to Polymarket…");
       const subRes = await fetch("/api/trade/submit", {
         method: "POST",
@@ -184,7 +214,7 @@ export function TradingView() {
       const json = await subRes.json();
       const orderId = json.orderId;
 
-      // ── Step 5: Persist locally ────────────────────────────────────────────
+      // ── Step 6: Persist locally ────────────────────────────────────────────
       addPosition({
         id: orderId,
         walletAddress: address,
