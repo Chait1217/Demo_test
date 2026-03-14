@@ -66,9 +66,13 @@ export async function POST(req: NextRequest) {
     const tokenIds = await getTokenIds();
     const tokenId  = side === "YES" ? tokenIds.yes : tokenIds.no;
 
-    // Size in tokens = notional USDC / price
+    // Size in tokens = collateral USDC / price.
+    // The order's makerAmount must equal what the user's wallet actually holds;
+    // Polymarket checks balanceOf(maker) on-chain and rejects orders where
+    // makerAmount > balance.  Leverage is tracked in our position store but the
+    // on-chain order only uses the user's own collateral.
     const preview    = computePositionPreview({ collateral, leverage }, 0);
-    const tokenCount = price > 0 ? preview.notional / price : preview.notional;
+    const tokenCount = price > 0 ? collateral / price : collateral;
 
     const { makerAmount, takerAmount } = getBuyAmounts(tokenCount, price);
 
