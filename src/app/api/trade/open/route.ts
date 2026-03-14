@@ -124,14 +124,12 @@ export async function POST(req: NextRequest) {
     let orderStatus = "SIMULATED";
 
     if (process.env.POLYMARKET_PRIVATE_KEY) {
-      try {
-        const order = await openPolymarketPosition({ side, price, size: preview.notional });
-        orderId = order.orderId ?? (order as any).orderID ?? orderId;
-        orderStatus = order.status ?? "PLACED";
-      } catch (e: any) {
-        // If Polymarket credentials not fully configured, log but don't block
-        console.error("Polymarket order failed:", e.message);
-      }
+      // Private key is configured — attempt real order and surface any errors
+      console.log("[Polymarket] Attempting real order:", { side, price, size: preview.notional });
+      const order = await openPolymarketPosition({ side, price, size: preview.notional });
+      console.log("[Polymarket] Order response:", JSON.stringify(order));
+      orderId = order.orderId ?? (order as any).orderID ?? orderId;
+      orderStatus = order.status ?? "PLACED";
     }
 
     // 5. Record position

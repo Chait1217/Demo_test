@@ -86,25 +86,25 @@ export function TradingView() {
     if (!canTrade || !address || !side) return;
     setError(""); setSuccess(""); setSubmitting(true);
     try {
-      // Generate local ID first; try real API to get real orderId
-      let orderId = `sim_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      try {
-        const res = await fetch("/api/trade/open", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            walletAddress: address,
-            side,
-            collateral: numCollateral,
-            leverage,
-            price: entryPrice,
-          }),
-        });
-        if (res.ok) {
-          const json = await res.json();
-          if (json.orderId) orderId = json.orderId;
-        }
-      } catch { /* API unreachable — use sim ID */ }
+      const res = await fetch("/api/trade/open", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          walletAddress: address,
+          side,
+          collateral: numCollateral,
+          leverage,
+          price: entryPrice,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || `Server error ${res.status}`);
+      }
+
+      const json = await res.json();
+      const orderId = json.orderId;
 
       // Write to localStorage immediately — Open Positions renders instantly
       addPosition({
