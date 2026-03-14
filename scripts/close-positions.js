@@ -16,9 +16,8 @@ const PRIVATE_KEY  = process.env.USER_PRIVATE_KEY;
 const RPC_URL      = process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com";
 const USDCe_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
-// Check both old vault and new vault
+// Vault contracts to check
 const VAULTS = [
-  { label: "Old vault", address: "0xB0B97F13a214D173bBAFd63a635b5216BdAdBaf4" },
   { label: "New vault", address: "0xEFf6d6282FEe1f31CE498704C3E104624cD5fbB4" },
 ];
 
@@ -111,11 +110,13 @@ async function main() {
   for (const { label, address } of VAULTS) {
     console.log(`── ${label} (${address})`);
     const vault = new ethers.Contract(address, VAULT_ABI, provider);
-    const shares = await vault.balanceOf(wallet.address);
-
-    if (!shares.eq(0)) anyFound = true;
-
-    await checkAndWithdraw(vault, wallet, provider);
+    try {
+      const shares = await vault.balanceOf(wallet.address);
+      if (!shares.eq(0)) anyFound = true;
+      await checkAndWithdraw(vault, wallet, provider);
+    } catch (err) {
+      console.log("  ⚠  Could not read contract:", err.reason ?? err.message);
+    }
     console.log();
   }
 
