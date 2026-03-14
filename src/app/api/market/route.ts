@@ -68,29 +68,42 @@ function parseOutcomePrices(m: GammaMarket): { yes: number; no: number } | null 
   return null;
 }
 
-/** Extract YES/NO token IDs from a Gamma market object */
+/** Extract YES/NO token IDs from a Gamma market object.
+ *  Handles both array and JSON-string forms of clobTokenIds / outcomes. */
 function parseTokenIds(m: GammaMarket): { yesTokenId: string; noTokenId: string } {
-  const tokens: { token_id: string; outcome: string }[] = Array.isArray(m.tokens)
-    ? (m.tokens as { token_id: string; outcome: string }[])
-    : [];
-  const clobIds: string[] = Array.isArray(m.clobTokenIds)
-    ? (m.clobTokenIds as string[])
-    : [];
+  // Form 1: tokens array with {token_id, outcome}
+  if (Array.isArray(m.tokens)) {
+    const tokens = m.tokens as { token_id: string; outcome: string }[];
+    const yes = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
+    const no  = tokens.find((t) => t.outcome?.toLowerCase() === "no");
+    if (yes?.token_id && no?.token_id)
+      return { yesTokenId: yes.token_id, noTokenId: no.token_id };
+  }
 
-  const yesToken = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
-  const noToken  = tokens.find((t) => t.outcome?.toLowerCase() === "no");
+  // Form 2: clobTokenIds (array or JSON string) + outcomes (array or JSON string)
+  let clobIds: string[] = [];
+  try {
+    const raw = m.clobTokenIds;
+    clobIds = Array.isArray(raw) ? (raw as string[]) : JSON.parse(raw as string);
+  } catch { /* ignore */ }
+
+  let outcomes: string[] = [];
+  try {
+    const raw = m.outcomes;
+    outcomes = Array.isArray(raw) ? (raw as string[]) : JSON.parse(raw as string);
+  } catch { /* ignore */ }
+
+  if (clobIds.length >= 2) {
+    const yesIdx = outcomes.findIndex((o) => o.toLowerCase() === "yes");
+    const noIdx  = outcomes.findIndex((o) => o.toLowerCase() === "no");
+    const yesId  = clobIds[yesIdx !== -1 ? yesIdx : 0];
+    const noId   = clobIds[noIdx  !== -1 ? noIdx  : 1];
+    if (yesId && noId) return { yesTokenId: yesId, noTokenId: noId };
+  }
 
   return {
-    yesTokenId:
-      yesToken?.token_id ||
-      clobIds[0] ||
-      process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES ||
-      "",
-    noTokenId:
-      noToken?.token_id ||
-      clobIds[1] ||
-      process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO ||
-      "",
+    yesTokenId: process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES ?? "",
+    noTokenId:  process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO  ?? "",
   };
 }
 
