@@ -217,14 +217,50 @@ export function TradingView() {
   async function closePosition(positionId: string, borrowed: number) {
     setClosing(positionId); setError(""); setSuccess("");
     try {
+      // For real orders: sign L1 auth so the server can cancel on Polymarket
+      const isSimulated = positionId.startsWith("sim_") || positionId.startsWith("placed_");
+      let l1Signature: string | undefined;
+      let l1Timestamp: number | undefined;
+
+      if (!isSimulated && address) {
+        l1Timestamp = Math.floor(Date.now() / 1000);
+        l1Signature = await signTypedDataAsync({
+          domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
+          types: {
+            ClobAuth: [
+              { name: "address",   type: "address" },
+              { name: "timestamp", type: "string"  },
+              { name: "nonce",     type: "uint256"  },
+              { name: "message",   type: "string"  },
+            ],
+          },
+          primaryType: "ClobAuth",
+          message: {
+            address:   address,
+            timestamp: String(l1Timestamp),
+            nonce:     BigInt(0),
+            message:   "This message attests that I control the given wallet",
+          },
+        });
+      }
+
       // Immediately update localStorage — UI reflects change instantly
       closePositionLocal(positionId);
-      // Best-effort API call (vault repay + Polymarket cancel)
+
+      // Fire-and-forget: cancel on Polymarket + repay vault
       fetch("/api/trade/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId: positionId, repayAmount: borrowed }),
-      }).catch(() => { /* ignore */ });
+        body: JSON.stringify({
+          orderId:      positionId,
+          repayAmount:  borrowed,
+          walletAddress: address,
+          l1Signature,
+          l1Timestamp,
+          l1Nonce: 0,
+        }),
+      }).catch(() => { /* ignore network errors — position already closed locally */ });
+
       setSuccess("Position closed successfully.");
     } catch (e: any) {
       setError(e.message);
