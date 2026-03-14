@@ -101,7 +101,7 @@ async function buildHmacSig(secret: string, ts: string, method: string, path: st
 // ── POST a pre-signed order to the Polymarket CLOB ──────────────────────────
 
 async function postSignedOrder(
-  _walletAddress: string,
+  walletAddress: string,
   creds: { key: string; secret: string; passphrase: string },
   orderWithSig: Record<string, unknown>,
 ): Promise<{ orderId?: string; orderID?: string; status?: string }> {
@@ -123,10 +123,10 @@ async function postSignedOrder(
     method:  "POST",
     headers: {
       "Content-Type": "application/json",
-      POLY_ADDRESS:   creds.key,
-      POLY_SIGNATURE: hmac,
-      POLY_TIMESTAMP: ts,
-      POLY_API_KEY:   creds.key,
+      POLY_ADDRESS:    walletAddress,   // signer's wallet address (not the API key)
+      POLY_SIGNATURE:  hmac,
+      POLY_TIMESTAMP:  ts,
+      POLY_API_KEY:    creds.key,
       POLY_PASSPHRASE: creds.passphrase,
     },
     body,
