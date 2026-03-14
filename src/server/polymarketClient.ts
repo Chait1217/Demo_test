@@ -75,12 +75,15 @@ export async function openPolymarketPosition(params: OpenPositionParams) {
   const [c, tokenIds] = await Promise.all([getFullClient(), getTokenIds()]);
   const tokenID = params.side === "YES" ? tokenIds.yes : tokenIds.no;
 
+  // size in CLOB is number of outcome tokens, not USD notional
+  const tokenCount = params.price > 0 ? params.size / params.price : params.size;
+
   const response = await c.createAndPostOrder(
     {
       tokenID,
       price: params.price,
-      size:  params.size,
-      side:  params.side === "YES" ? Side.BUY : Side.SELL,
+      size:  tokenCount,
+      side:  Side.BUY, // always BUY the chosen outcome token (YES or NO)
     },
     { tickSize: "0.01", negRisk: false },
     OrderType.GTC
