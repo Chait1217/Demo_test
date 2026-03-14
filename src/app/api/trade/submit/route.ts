@@ -101,19 +101,29 @@ async function buildHmacSig(secret: string, ts: string, method: string, path: st
 // ── POST a pre-signed order to the Polymarket CLOB ──────────────────────────
 
 async function postSignedOrder(
-  walletAddress: string,
+  _walletAddress: string,
   creds: { key: string; secret: string; passphrase: string },
   orderWithSig: Record<string, unknown>,
 ): Promise<{ orderId?: string; orderID?: string; status?: string }> {
+  // Normalise fields to match what the CLOB client's orderToJson produces:
+  //   salt  → integer (not string)
+  //   side  → "BUY" | "SELL" string (not 0/1 number)
+  //   owner → API key (creds.key), NOT wallet address
+  const normalisedOrder = {
+    ...orderWithSig,
+    salt: Number.parseInt(orderWithSig.salt as string, 10),
+    side: (orderWithSig.side === 0 || orderWithSig.side === "0") ? "BUY" : "SELL",
+  };
+
   const ts   = String(Math.floor(Date.now() / 1000));
-  const body = JSON.stringify({ order: orderWithSig, owner: walletAddress, orderType: "GTC" });
+  const body = JSON.stringify({ deferExec: false, order: normalisedOrder, owner: creds.key, orderType: "GTC" });
   const hmac = await buildHmacSig(creds.secret, ts, "POST", "/order", body);
 
   const res = await fetch(`${POLYMARKET_API_HOST}/order`, {
     method:  "POST",
     headers: {
       "Content-Type": "application/json",
-      POLY_ADDRESS:   walletAddress,
+      POLY_ADDRESS:   creds.key,
       POLY_SIGNATURE: hmac,
       POLY_TIMESTAMP: ts,
       POLY_API_KEY:   creds.key,
