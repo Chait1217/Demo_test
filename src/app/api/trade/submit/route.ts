@@ -106,7 +106,7 @@ async function postSignedOrder(
   orderWithSig: Record<string, unknown>,
 ): Promise<{ orderId?: string; orderID?: string; status?: string }> {
   const ts   = String(Math.floor(Date.now() / 1000));
-  const body = JSON.stringify({ order: orderWithSig, orderType: "GTC", expose_neg_risk: false });
+  const body = JSON.stringify({ order: orderWithSig, owner: walletAddress, orderType: "GTC" });
   const hmac = await buildHmacSig(creds.secret, ts, "POST", "/order", body);
 
   const res = await fetch(`${POLYMARKET_API_HOST}/order`, {
