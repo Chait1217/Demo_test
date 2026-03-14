@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "deploy:vault": "node scripts/deploy.js"
+    "deploy:vault": "node scripts/deploy.js",
+    "close:positions": "node scripts/close-positions.js"
   },
   "repository": {
     "type": "git",

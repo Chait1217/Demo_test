@@ -10,7 +10,7 @@ export const USDCe_ADDRESS: Address =
 // Deployed LeveragedVault
 export const VAULT_ADDRESS: Address = (
   process.env.NEXT_PUBLIC_VAULT_ADDRESS ??
-  "0xB0B97F13a214D173bBAFd63a635b5216BdAdBaf4"
+  "0xEFf6d6282FEe1f31CE498704C3E104624cD5fbB4"
 ) as Address;
 
 export const MARKET_QUESTION = "Will the Iranian regime fall by June 30?";
