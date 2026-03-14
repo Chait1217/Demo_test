@@ -15,4 +15,4 @@ export const leveragedVaultAbi = [
 
 // Hardcoded vault address — override with NEXT_PUBLIC_VAULT_ADDRESS env var
 export const leveragedVaultAddress: Address =
-  (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? "0xB0B97F13a214D173bBAFd63a635b5216BdAdBaf4") as Address;
+  (process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? "0xEFf6d6282FEe1f31CE498704C3E104624cD5fbB4") as Address;
