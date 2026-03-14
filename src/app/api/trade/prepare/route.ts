@@ -2,8 +2,25 @@ import { NextRequest } from "next/server";
 import { getTokenIds } from "@/server/polymarketClient";
 import { computePositionPreview } from "@/lib/leverage";
 
-const CTF_EXCHANGE_ADDRESS = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+const CONTRACTS = {
+  exchange:        "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+  negRiskExchange: "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+};
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+async function getExchangeAddress(tokenId: string): Promise<string> {
+  try {
+    const res = await fetch(
+      `https://clob.polymarket.com/neg-risk?token_id=${tokenId}`,
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    if (res.ok) {
+      const data = await res.json() as { neg_risk?: boolean };
+      if (data.neg_risk) return CONTRACTS.negRiskExchange;
+    }
+  } catch { /* network error — fall back to standard exchange */ }
+  return CONTRACTS.exchange;
+}
 
 // Rounding helpers (mirrors CLOB client helpers.js for 0.01 tick size)
 const RC = { price: 2, size: 2, amount: 4 };
@@ -55,8 +72,11 @@ export async function POST(req: NextRequest) {
 
     const { makerAmount, takerAmount } = getBuyAmounts(tokenCount, price);
 
-    const salt        = Math.round(Math.random() * Date.now()).toString();
-    const l1Timestamp = Math.floor(Date.now() / 1000);
+    const [exchangeAddress, salt, l1Timestamp] = await Promise.all([
+      getExchangeAddress(tokenId),
+      Promise.resolve(Math.round(Math.random() * Date.now()).toString()),
+      Promise.resolve(Math.floor(Date.now() / 1000)),
+    ]);
 
     // Unsigned order struct — matches the EIP-712 Order type exactly
     const orderStruct = {
@@ -76,7 +96,7 @@ export async function POST(req: NextRequest) {
 
     return Response.json({
       orderStruct,
-      exchangeAddress: CTF_EXCHANGE_ADDRESS,
+      exchangeAddress,
       l1Timestamp,
       l1Nonce: 0,
       preview,
