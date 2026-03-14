@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount, useChainId, useSwitchChain } from "wagmi";
+import { useAccount, useChainId, useSwitchChain, useSignTypedData } from "wagmi";
 import { polygon } from "wagmi/chains";
 import { useMarket } from "@/hooks/useMarket";
 import { useUsdcBalance } from "@/hooks/useUsdcBalance";
@@ -59,10 +59,13 @@ export function TradingView() {
   const { snapshot, isDeployed: vaultDeployed } = useVault();
   const { data: positions, refetch: refetchPositions } = usePositions();
 
+  const { signTypedDataAsync } = useSignTypedData();
+
   const [side, setSide]             = useState<Side | null>(null);
   const [collateral, setCollateral] = useState("");
   const [leverage, setLeverage]     = useState(1);
   const [submitting, setSubmitting] = useState(false);
+  const [submitStep, setSubmitStep] = useState<string>("");
   const [closing, setClosing]       = useState<string | null>(null);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
@@ -86,46 +89,119 @@ export function TradingView() {
     if (!canTrade || !address || !side) return;
     setError(""); setSuccess(""); setSubmitting(true);
     try {
-      const res = await fetch("/api/trade/open", {
+      // ── Step 1: Prepare the order struct server-side ──────────────────────
+      setSubmitStep("Preparing order…");
+      const prepRes = await fetch("/api/trade/prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ walletAddress: address, side, collateral: numCollateral, leverage, price: entryPrice }),
+      });
+      if (!prepRes.ok) throw new Error(await prepRes.text() || `Prepare error ${prepRes.status}`);
+      const { orderStruct, exchangeAddress, l1Timestamp, l1Nonce } = await prepRes.json();
+
+      // ── Step 2: Sign the Polymarket L1 auth message (wallet popup #1) ─────
+      setSubmitStep("Sign to authenticate with Polymarket… (1/2)");
+      const l1Signature = await signTypedDataAsync({
+        domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
+        types: {
+          ClobAuth: [
+            { name: "address",   type: "address" },
+            { name: "timestamp", type: "string"  },
+            { name: "nonce",     type: "uint256"  },
+            { name: "message",   type: "string"  },
+          ],
+        },
+        primaryType: "ClobAuth",
+        message: {
+          address:   address,
+          timestamp: String(l1Timestamp),
+          nonce:     BigInt(l1Nonce),
+          message:   "This message attests that I control the given wallet",
+        },
+      });
+
+      // ── Step 3: Sign the order itself (wallet popup #2) ───────────────────
+      setSubmitStep("Sign to authorise this trade… (2/2)");
+      const orderSignature = await signTypedDataAsync({
+        domain: {
+          name:              "Polymarket CTF Exchange",
+          version:           "1",
+          chainId:           polygon.id,
+          verifyingContract: exchangeAddress as `0x${string}`,
+        },
+        types: {
+          Order: [
+            { name: "salt",          type: "uint256" },
+            { name: "maker",         type: "address" },
+            { name: "signer",        type: "address" },
+            { name: "taker",         type: "address" },
+            { name: "tokenId",       type: "uint256" },
+            { name: "makerAmount",   type: "uint256" },
+            { name: "takerAmount",   type: "uint256" },
+            { name: "expiration",    type: "uint256" },
+            { name: "nonce",         type: "uint256" },
+            { name: "feeRateBps",    type: "uint256" },
+            { name: "side",          type: "uint8"   },
+            { name: "signatureType", type: "uint8"   },
+          ],
+        },
+        primaryType: "Order",
+        message: {
+          salt:          BigInt(orderStruct.salt),
+          maker:         orderStruct.maker         as `0x${string}`,
+          signer:        orderStruct.signer        as `0x${string}`,
+          taker:         orderStruct.taker         as `0x${string}`,
+          tokenId:       BigInt(orderStruct.tokenId),
+          makerAmount:   BigInt(orderStruct.makerAmount),
+          takerAmount:   BigInt(orderStruct.takerAmount),
+          expiration:    BigInt(orderStruct.expiration),
+          nonce:         BigInt(orderStruct.nonce),
+          feeRateBps:    BigInt(orderStruct.feeRateBps),
+          side:          orderStruct.side          as number,
+          signatureType: orderStruct.signatureType as number,
+        },
+      });
+
+      // ── Step 4: Submit to CLOB via server (derives API creds + posts order) ─
+      setSubmitStep("Submitting to Polymarket…");
+      const subRes = await fetch("/api/trade/submit", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           walletAddress: address,
+          l1Signature,
+          l1Timestamp,
+          l1Nonce,
+          orderStruct,
+          orderSignature,
           side,
           collateral: numCollateral,
           leverage,
           price: entryPrice,
         }),
       });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(errText || `Server error ${res.status}`);
-      }
-
-      const json = await res.json();
+      if (!subRes.ok) throw new Error(await subRes.text() || `Submit error ${subRes.status}`);
+      const json = await subRes.json();
       const orderId = json.orderId;
 
-      // Write to localStorage immediately — Open Positions renders instantly
+      // ── Step 5: Persist locally ────────────────────────────────────────────
       addPosition({
         id: orderId,
         walletAddress: address,
         side,
         entryPrice,
         collateral: numCollateral,
-        borrowed: preview.borrowed,
-        notional: preview.notional,
+        borrowed:  json.preview?.borrowed  ?? preview.borrowed,
+        notional:  json.preview?.notional  ?? preview.notional,
         leverage,
         fees: {
-          openFee: preview.fees.openFee,
-          closeFee: preview.fees.closeFee,
-          liquidationFee: preview.fees.liquidationFee,
+          openFee:        json.preview?.fees?.openFee        ?? preview.fees.openFee,
+          closeFee:       json.preview?.fees?.closeFee       ?? preview.fees.closeFee,
+          liquidationFee: json.preview?.fees?.liquidationFee ?? preview.fees.liquidationFee,
         },
-        state: "OPEN",
+        state:    "OPEN",
         openedAt: new Date().toISOString(),
       });
-
-      // Force a re-read from localStorage so the positions list is always in sync
       refetchPositions();
 
       setSuccess(`Position opened · ID: ${orderId}`);
@@ -134,6 +210,7 @@ export function TradingView() {
       setError(e.message);
     } finally {
       setSubmitting(false);
+      setSubmitStep("");
     }
   }
 
@@ -327,7 +404,7 @@ export function TradingView() {
             : !side
             ? "Select YES or NO"
             : submitting
-            ? "Opening Position…"
+            ? (submitStep || "Opening Position…")
             : `Open ${side} Position · $${preview.notional.toFixed(2)}`}
         </button>
         {!isConnected && (
