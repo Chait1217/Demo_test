@@ -56,7 +56,7 @@ export function TradingView() {
   const isWrongChain = isConnected && chainId !== polygon.id;
   const { data: market, isLoading: marketLoading } = useMarket();
   const { rawBalance } = useUsdcBalance();
-  const { snapshot } = useVault();
+  const { snapshot, isDeployed: vaultDeployed } = useVault();
   const { data: positions, refetch: refetchPositions } = usePositions();
 
   const [side, setSide]             = useState<Side | null>(null);
