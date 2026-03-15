@@ -102,7 +102,15 @@ export function TradingView() {
       const prepRes = await fetch("/api/trade/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletAddress: address, side, collateral: numCollateral, leverage, price: entryPrice }),
+        body: JSON.stringify({
+          walletAddress: address,
+          side,
+          collateral: numCollateral,
+          leverage,
+          price: entryPrice,
+          yesTokenId: market?.yesTokenId ?? "",
+          noTokenId:  market?.noTokenId  ?? "",
+        }),
       });
       if (!prepRes.ok) throw new Error(await prepRes.text() || `Prepare error ${prepRes.status}`);
       const { orderStruct, exchangeAddress, l1Timestamp, l1Nonce } = await prepRes.json();

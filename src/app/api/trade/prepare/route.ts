@@ -51,20 +51,29 @@ function getBuyAmounts(size: number, price: number) {
 
 export async function POST(req: NextRequest) {
   try {
-    const { walletAddress, side, collateral, leverage, price } = await req.json() as {
+    const { walletAddress, side, collateral, leverage, price, yesTokenId, noTokenId } = await req.json() as {
       walletAddress: string;
       side: "YES" | "NO";
       collateral: number;
       leverage: number;
       price: number;
+      yesTokenId?: string;
+      noTokenId?: string;
     };
 
     if (!walletAddress || !side || !collateral || !leverage || !price) {
       return new Response("Invalid payload", { status: 400 });
     }
 
-    const tokenIds = await getTokenIds();
-    const tokenId  = side === "YES" ? tokenIds.yes : tokenIds.no;
+    // Use client-supplied token IDs first (avoids a redundant Gamma API call
+    // and works even when the API is unreachable server-side).
+    let tokenId: string;
+    if (yesTokenId && noTokenId) {
+      tokenId = side === "YES" ? yesTokenId : noTokenId;
+    } else {
+      const tokenIds = await getTokenIds();
+      tokenId = side === "YES" ? tokenIds.yes : tokenIds.no;
+    }
 
     // Size in tokens = collateral USDC / price.
     // The order's makerAmount must equal what the user's wallet actually holds;
