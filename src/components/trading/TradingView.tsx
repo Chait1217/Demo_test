@@ -256,6 +256,10 @@ export function TradingView() {
         },
         state:    "OPEN",
         openedAt: new Date().toISOString(),
+        // Store fields needed to SELL tokens back when closing a filled position
+        tokenId:         orderStruct.tokenId as string,
+        tokenCount:      Number(BigInt(orderStruct.takerAmount as string)) / 1e6,
+        exchangeAddress,
       });
       refetchPositions();
 
@@ -272,13 +276,16 @@ export function TradingView() {
   async function closePosition(positionId: string, borrowed: number) {
     setClosing(positionId); setError(""); setSuccess("");
     try {
-      // For real orders: sign L1 auth so the server can cancel on Polymarket
       const isSimulated = positionId.startsWith("sim_") || positionId.startsWith("placed_");
       let l1Signature: string | undefined;
       let l1Timestamp: number | undefined;
+      let sellOrderStruct: Record<string, unknown> | undefined;
+      let sellOrderSignature: string | undefined;
 
       if (!isSimulated && address) {
         l1Timestamp = Math.floor(Date.now() / 1000);
+
+        // ── Sign L1 auth (wallet popup #1) ──────────────────────────────────
         l1Signature = await signTypedDataAsync({
           domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
           types: {
@@ -297,22 +304,92 @@ export function TradingView() {
             message:   "This message attests that I control the given wallet",
           },
         });
+
+        // ── Build + sign SELL order for filled-position recovery ─────────────
+        // Look up stored position data (tokenId, tokenCount, exchangeAddress)
+        const pos = (positions ?? []).find((p) => p.id === positionId);
+        if (pos?.tokenId && pos.tokenCount && pos.exchangeAddress) {
+          const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+          const currentPrice = pos.side === "YES" ? yesPrice : noPrice;
+          // makerAmount = tokens we give; takerAmount = USDC we receive
+          const makerAmountRaw = Math.round(pos.tokenCount * 1_000_000).toString();
+          const takerAmountRaw = Math.round(pos.tokenCount * currentPrice * 1_000_000).toString();
+          const sellSalt       = Math.round(Math.random() * Date.now()).toString();
+
+          sellOrderStruct = {
+            salt:          sellSalt,
+            maker:         address,
+            signer:        address,
+            taker:         ZERO_ADDRESS,
+            tokenId:       pos.tokenId,
+            makerAmount:   makerAmountRaw,
+            takerAmount:   takerAmountRaw,
+            expiration:    "0",
+            nonce:         "0",
+            feeRateBps:    "0",
+            side:          1,   // SELL
+            signatureType: 0,   // EOA
+          };
+
+          // ── Sign the SELL order (wallet popup #2) ────────────────────────
+          sellOrderSignature = await signTypedDataAsync({
+            domain: {
+              name:              "Polymarket CTF Exchange",
+              version:           "1",
+              chainId:           polygon.id,
+              verifyingContract: pos.exchangeAddress as `0x${string}`,
+            },
+            types: {
+              Order: [
+                { name: "salt",          type: "uint256" },
+                { name: "maker",         type: "address" },
+                { name: "signer",        type: "address" },
+                { name: "taker",         type: "address" },
+                { name: "tokenId",       type: "uint256" },
+                { name: "makerAmount",   type: "uint256" },
+                { name: "takerAmount",   type: "uint256" },
+                { name: "expiration",    type: "uint256" },
+                { name: "nonce",         type: "uint256" },
+                { name: "feeRateBps",    type: "uint256" },
+                { name: "side",          type: "uint8"   },
+                { name: "signatureType", type: "uint8"   },
+              ],
+            },
+            primaryType: "Order",
+            message: {
+              salt:          BigInt(sellOrderStruct.salt as string),
+              maker:         sellOrderStruct.maker  as `0x${string}`,
+              signer:        sellOrderStruct.signer as `0x${string}`,
+              taker:         sellOrderStruct.taker  as `0x${string}`,
+              tokenId:       BigInt(sellOrderStruct.tokenId  as string),
+              makerAmount:   BigInt(sellOrderStruct.makerAmount as string),
+              takerAmount:   BigInt(sellOrderStruct.takerAmount as string),
+              expiration:    BigInt(sellOrderStruct.expiration  as string),
+              nonce:         BigInt(sellOrderStruct.nonce       as string),
+              feeRateBps:    BigInt(sellOrderStruct.feeRateBps  as string),
+              side:          sellOrderStruct.side          as number,
+              signatureType: sellOrderStruct.signatureType as number,
+            },
+          });
+        }
       }
 
       // Immediately update localStorage — UI reflects change instantly
       closePositionLocal(positionId);
 
-      // Fire-and-forget: cancel on Polymarket + repay vault
+      // Cancel (or SELL if filled) on Polymarket + repay vault
       fetch("/api/trade/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          orderId:      positionId,
-          repayAmount:  borrowed,
-          walletAddress: address,
+          orderId:           positionId,
+          repayAmount:       borrowed,
+          walletAddress:     address,
           l1Signature,
           l1Timestamp,
-          l1Nonce: 0,
+          l1Nonce:           0,
+          sellOrderStruct,
+          sellOrderSignature,
         }),
       }).catch(() => { /* ignore network errors — position already closed locally */ });
 
