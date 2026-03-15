@@ -8,11 +8,16 @@ import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
 import { usePositions, addPosition, updatePosition, closePositionLocal } from "@/hooks/usePositions";
 import { computePositionPreview } from "@/lib/leverage";
-import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS } from "@/lib/constants";
+import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS, CTF_TOKEN_ADDRESS } from "@/lib/constants";
 
 const ERC20_APPROVE_ABI = [
   { name: "allowance", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
   { name: "approve",   type: "function", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "amount",  type: "uint256" }], outputs: [{ name: "", type: "bool"    }] },
+] as const;
+
+const ERC1155_APPROVAL_ABI = [
+  { name: "isApprovedForAll", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "operator", type: "address" }], outputs: [{ name: "", type: "bool" }] },
+  { name: "setApprovalForAll", type: "function", stateMutability: "nonpayable", inputs: [{ name: "operator", type: "address" }, { name: "approved", type: "bool" }], outputs: [] },
 ] as const;
 
 type Side = "YES" | "NO";
@@ -310,6 +315,24 @@ export function TradingView() {
         // Look up stored position data (tokenId, tokenCount, exchangeAddress)
         const pos = (positions ?? []).find((p) => p.id === positionId);
         if (pos?.tokenId && pos.tokenCount && pos.exchangeAddress) {
+          // ERC-1155 SELL orders require the exchange to be approved as an operator.
+          setSubmitStep("Checking ERC-1155 token approval…");
+          const isApproved = await publicClient!.readContract({
+            address:      CTF_TOKEN_ADDRESS,
+            abi:          ERC1155_APPROVAL_ABI,
+            functionName: "isApprovedForAll",
+            args:         [address as `0x${string}`, pos.exchangeAddress as `0x${string}`],
+          });
+          if (!isApproved) {
+            setSubmitStep("Approving exchange to transfer tokens (wallet popup)…");
+            const approveTx = await writeContractAsync({
+              address:      CTF_TOKEN_ADDRESS,
+              abi:          ERC1155_APPROVAL_ABI,
+              functionName: "setApprovalForAll",
+              args:         [pos.exchangeAddress as `0x${string}`, true],
+            });
+            await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+          }
           const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
           const currentPrice = pos.side === "YES" ? yesPrice : noPrice;
           // Round to 0.01 tick size — same rule the CLOB enforces on price = takerAmount/makerAmount
