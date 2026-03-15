@@ -8,7 +8,8 @@ import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
 import { usePositions, addPosition, updatePosition, closePositionLocal } from "@/hooks/usePositions";
 import { computePositionPreview } from "@/lib/leverage";
-import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS, CTF_TOKEN_ADDRESS } from "@/lib/constants";
+import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS, CTF_TOKEN_ADDRESS, VAULT_ADDRESS } from "@/lib/constants";
+import { leveragedVaultAbi } from "@/lib/vaultAbi";
 
 const ERC20_APPROVE_ABI = [
   { name: "allowance", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
@@ -122,13 +123,11 @@ export function TradingView() {
       if (!prepRes.ok) throw new Error(await prepRes.text() || `Prepare error ${prepRes.status}`);
       const { orderStruct, exchangeAddress, l1Timestamp, l1Nonce } = await prepRes.json();
 
-      // ── Step 1b: Hard balance check against actual makerAmount ────────────
-      // makerAmount is in USDC.e micro-units (6 decimals).  Check before any
-      // wallet prompt so the user gets a clear error instead of a CLOB 400.
-      const makerAmountUsdc = Number(BigInt(orderStruct.makerAmount as string)) / 1e6;
-      if (rawBalance < makerAmountUsdc) {
+      // ── Step 1b: Hard balance check — user only needs to cover their collateral;
+      // the vault will provide the borrowed portion in Step 2b below.
+      if (rawBalance < numCollateral) {
         throw new Error(
-          `Insufficient USDC.e balance — need $${makerAmountUsdc.toFixed(2)}, wallet has $${rawBalance.toFixed(2)}`
+          `Insufficient USDC.e balance — need $${numCollateral.toFixed(2)}, wallet has $${rawBalance.toFixed(2)}`
         );
       }
 
@@ -159,6 +158,24 @@ export function TradingView() {
           setSubmitStep("Waiting for approval confirmation…");
           await publicClient!.waitForTransactionReceipt({ hash: approveTx });
         }
+      }
+
+      // ── Step 2b: Borrow leveraged portion from vault ─────────────────────
+      // The vault sends borrowed USDC directly to the user's wallet so the
+      // full notional is available when Polymarket fills the BUY order.
+      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+      const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
+      if (hasVault && preview.borrowed > 0) {
+        setSubmitStep("Borrowing from vault… (wallet prompt)");
+        const borrowRaw = BigInt(Math.round(preview.borrowed * 1_000_000));
+        const borrowTx  = await writeContractAsync({
+          address:      VAULT_ADDRESS as `0x${string}`,
+          abi:          leveragedVaultAbi,
+          functionName: "borrow",
+          args:         [borrowRaw],
+        });
+        setSubmitStep("Waiting for borrow confirmation…");
+        await publicClient!.waitForTransactionReceipt({ hash: borrowTx });
       }
 
       // ── Step 3: Sign the Polymarket L1 auth message (wallet popup #1) ─────

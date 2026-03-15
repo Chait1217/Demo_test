@@ -82,7 +82,8 @@ export async function POST(req: NextRequest) {
     // Dividing by the rounded price first guarantees makerAmount ≤ collateral.
     const preview      = computePositionPreview({ collateral, leverage }, 0);
     const roundedPrice = Math.round(price * 100) / 100 || price;   // 2 d.p. = CLOB tick size
-    const tokenCount   = roundedPrice > 0 ? collateral / roundedPrice : collateral;
+    // Use notional (collateral + borrowed) so the order covers the full leveraged size.
+    const tokenCount   = roundedPrice > 0 ? preview.notional / roundedPrice : preview.notional;
 
     const { makerAmount, takerAmount } = getBuyAmounts(tokenCount, price);
 
