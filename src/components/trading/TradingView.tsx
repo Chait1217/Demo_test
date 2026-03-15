@@ -8,8 +8,7 @@ import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
 import { usePositions, addPosition, updatePosition, closePositionLocal } from "@/hooks/usePositions";
 import { computePositionPreview } from "@/lib/leverage";
-import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS, CTF_TOKEN_ADDRESS, VAULT_ADDRESS } from "@/lib/constants";
-import { leveragedVaultAbi } from "@/lib/vaultAbi";
+import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS, CTF_TOKEN_ADDRESS } from "@/lib/constants";
 
 const ERC20_APPROVE_ABI = [
   { name: "allowance", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
@@ -160,23 +159,10 @@ export function TradingView() {
         }
       }
 
-      // ── Step 2b: Borrow leveraged portion from vault ─────────────────────
-      // The vault sends borrowed USDC directly to the user's wallet so the
-      // full notional is available when Polymarket fills the BUY order.
-      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-      const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
-      if (hasVault && preview.borrowed > 0) {
-        setSubmitStep("Borrowing from vault… (wallet prompt)");
-        const borrowRaw = BigInt(Math.round(preview.borrowed * 1_000_000));
-        const borrowTx  = await writeContractAsync({
-          address:      VAULT_ADDRESS as `0x${string}`,
-          abi:          leveragedVaultAbi,
-          functionName: "borrow",
-          args:         [borrowRaw],
-        });
-        setSubmitStep("Waiting for borrow confirmation…");
-        await publicClient!.waitForTransactionReceipt({ hash: borrowTx, timeout: 60_000 });
-      }
+      // ── Step 2b: vault.borrow() is onlyEngine — the SERVER handles borrowing ─
+      // The submit route calls vault.borrow() with the server's marginEngine wallet
+      // and then transfers the borrowed USDC to the user's wallet. No client action
+      // needed here; the server does it before posting the Polymarket order.
 
       // ── Step 3: Sign the Polymarket L1 auth message (wallet popup #1) ─────
       setSubmitStep("Sign to authenticate with Polymarket… (1/2)");
@@ -449,42 +435,35 @@ export function TradingView() {
         throw new Error(`Close failed (${closeRes.status}): ${errText}`);
       }
 
-      // ── Repay vault from user's wallet ────────────────────────────────────
-      // The SELL order was just posted; for a quickly-filled market-price order
-      // the USDC is already (or imminently) back in the wallet. Attempt repay
-      // now so the vault's accounting stays in sync. If the SELL hasn't settled
-      // yet this will fail gracefully and the user can repay later.
-      if (!isSimulated && VAULT_ADDRESS && VAULT_ADDRESS !== "0x0000000000000000000000000000000000000000" && borrowed > 0) {
+      // ── Send borrowed USDC back to engine wallet so server can repay vault ──
+      // vault.repay() is onlyEngine — the server wallet must call it. The user
+      // first transfers the borrowed amount to the server's engine wallet, then
+      // the close route (already called above) handles vault.repay() server-side.
+      // This step only applies to filled positions (where the user sold tokens and
+      // received USDC back). For cancelled open orders the user already has collateral.
+      if (!isSimulated && borrowed > 0) {
         try {
-          const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
-          // Approve vault to pull back the borrowed USDC
-          const repayAllowance = await publicClient!.readContract({
-            address:      USDCe_ADDRESS,
-            abi:          ERC20_APPROVE_ABI,
-            functionName: "allowance",
-            args:         [address as `0x${string}`, VAULT_ADDRESS as `0x${string}`],
-          }) as bigint;
-          if (repayAllowance < repayRaw) {
-            setSubmitStep("Approve vault to collect repayment… (wallet prompt)");
-            const approveTx = await writeContractAsync({
+          const engRes = await fetch("/api/engine-address");
+          const { address: engineAddress } = await engRes.json() as { address: string | null };
+          if (engineAddress) {
+            const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
+            setClosing(positionId); // keep spinner
+            const ERC20_TRANSFER_ABI = [{
+              name: "transfer", type: "function", stateMutability: "nonpayable",
+              inputs:  [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
+              outputs: [{ name: "", type: "bool" }],
+            }] as const;
+            const transferTx = await writeContractAsync({
               address:      USDCe_ADDRESS,
-              abi:          ERC20_APPROVE_ABI,
-              functionName: "approve",
-              args:         [VAULT_ADDRESS as `0x${string}`, repayRaw],
+              abi:          ERC20_TRANSFER_ABI,
+              functionName: "transfer",
+              args:         [engineAddress as `0x${string}`, repayRaw],
             });
-            await publicClient!.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
+            await publicClient!.waitForTransactionReceipt({ hash: transferTx, timeout: 60_000 });
           }
-          setSubmitStep("Repaying vault… (wallet prompt)");
-          const repayTx = await writeContractAsync({
-            address:      VAULT_ADDRESS as `0x${string}`,
-            abi:          leveragedVaultAbi,
-            functionName: "repay",
-            args:         [repayRaw],
-          });
-          await publicClient!.waitForTransactionReceipt({ hash: repayTx, timeout: 60_000 });
         } catch (repayErr: any) {
-          // Non-fatal — SELL may not have filled yet; user retains the obligation
-          console.warn("[close] vault repay failed (non-fatal):", repayErr.message);
+          // Non-fatal — position is closed on Polymarket regardless
+          console.warn("[close] repay transfer non-fatal:", repayErr.message);
         }
       }
 

@@ -1,6 +1,16 @@
 import { NextRequest } from "next/server";
+import { createPublicClient, createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { recordClosePosition } from "@/server/positionsStore";
-import { POLYMARKET_API_HOST } from "@/lib/constants";
+import { POLYGON_CHAIN, USDCe_ADDRESS, VAULT_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
+import { leveragedVaultAbi } from "@/lib/vaultAbi";
+
+const publicClient = createPublicClient({
+  chain:     POLYGON_CHAIN,
+  transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com", {
+    timeout: 10_000, retryCount: 0,
+  }),
+});
 
 // ── HMAC ─────────────────────────────────────────────────────────────────────
 
@@ -140,6 +150,7 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json() as {
       orderId:          string;
+      repayAmount?:     number;   // borrowed amount to repay to vault (in USDC, 6-dec)
       walletAddress?:   string;
       l1Signature?:     string;
       l1Timestamp?:     number;
@@ -150,7 +161,7 @@ export async function POST(req: NextRequest) {
     };
 
     const {
-      orderId,
+      orderId, repayAmount,
       walletAddress, l1Signature, l1Timestamp, l1Nonce,
       sellOrderStruct, sellOrderSignature,
     } = body;
@@ -188,11 +199,37 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // vault.repay() is executed client-side (TradingView.tsx) from the user's
-    // own wallet after the SELL is posted, so the USDC goes back to the vault
-    // from the correct address with the correct on-chain balance.
+    // ── 2. Repay vault (server is the marginEngine, onlyEngine on repay()) ──────
+    // The user sent borrowed USDC to the server wallet (engine) before calling
+    // this route. The server now pulls those funds into the vault via repay().
+    const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+    const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
+    const serverPk  = process.env.POLYMARKET_PRIVATE_KEY;
 
-    // ── 2. Record closure ─────────────────────────────────────────────────────
+    if (hasVault && repayAmount && repayAmount > 0 && serverPk) {
+      try {
+        const repayRaw   = BigInt(Math.round(repayAmount * 1_000_000));
+        const rpcUrl     = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
+        const account    = privateKeyToAccount(serverPk as `0x${string}`);
+        const walletClient = createWalletClient({
+          account,
+          chain:     POLYGON_CHAIN,
+          transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
+        });
+        const repayHash = await walletClient.writeContract({
+          address:      VAULT_ADDRESS,
+          abi:          leveragedVaultAbi,
+          functionName: "repay",
+          args:         [repayRaw],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: repayHash, timeout: 30_000 });
+        console.log(`[close] vault repay: $${repayAmount.toFixed(2)} USDC`);
+      } catch (e: any) {
+        console.warn("[close] vault repay non-fatal:", e.message);
+      }
+    }
+
+    // ── 3. Record closure ─────────────────────────────────────────────────────
     recordClosePosition(orderId);
 
     return Response.json({ ok: true, orderId });
