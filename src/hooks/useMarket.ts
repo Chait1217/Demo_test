@@ -1,6 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { useLivePrices } from "./useLivePrices";
 
 export interface MarketData {
   question:     string;
@@ -42,12 +43,20 @@ export function useMarket() {
   const { data, isLoading } = useQuery<MarketData>({
     queryKey:        ["market"],
     queryFn:         fetchMarket,
-    refetchInterval: 10_000,   // poll every 10s — server caches prices for 8s
-    staleTime:       8_000,
+    refetchInterval: 60_000,  // refresh metadata every 60s — live prices come from WS
+    staleTime:       55_000,
     retry:           3,
     retryDelay:      2_000,
     initialData:     DEFAULT,
   });
 
-  return { data: data!, isLoading };
+  // WebSocket live price feed — updates on every order book change (ms-level)
+  const live = useLivePrices(data?.yesTokenId || undefined);
+
+  // Merge: WebSocket prices override the HTTP-fetched snapshot when available
+  const merged: MarketData = live
+    ? { ...data!, yesPrice: live.yesPrice, noPrice: live.noPrice, spread: live.spread }
+    : data!;
+
+  return { data: merged, isLoading };
 }
