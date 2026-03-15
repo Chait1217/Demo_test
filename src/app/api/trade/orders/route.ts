@@ -83,6 +83,16 @@ async function getExchangeAddress(tokenId: string): Promise<string> {
   return CTF_EXCHANGE;
 }
 
+/** Convert a decimal token ID (uint256) to 0x-prefixed 64-char hex — what the CLOB expects */
+function tokenIdToHex(tokenId: string): string {
+  try {
+    const hex = BigInt(tokenId).toString(16);
+    return `0x${hex.padStart(64, "0")}`;
+  } catch {
+    return tokenId; // already hex or unrecognised — pass through
+  }
+}
+
 /**
  * Query the CLOB balance-allowance endpoint for a conditional token.
  * Returns the number of tokens held in the user's Polymarket proxy wallet,
@@ -93,14 +103,16 @@ async function getConditionalTokenBalance(
   creds: { key: string; secret: string; passphrase: string },
   tokenId: string,
 ): Promise<number> {
-  const ts = String(Math.floor(Date.now() / 1000));
+  const ts      = String(Math.floor(Date.now() / 1000));
+  const hexId   = tokenIdToHex(tokenId);
+  console.log(`[orders] checking balance for token ${tokenId.slice(0, 10)}… (hex: ${hexId.slice(0, 12)}…)`);
 
   // Step 1: tell CLOB to refresh its cache from on-chain state
   try {
     const updatePath = "/balance-allowance/update";
     const updateHmac = await buildHmacSig(creds.secret, ts, "GET", updatePath);
     await fetch(
-      `${POLYMARKET_API_HOST}${updatePath}?asset_type=1&token_id=${tokenId}`,
+      `${POLYMARKET_API_HOST}${updatePath}?asset_type=1&token_id=${hexId}`,
       {
         headers: makeAuthHeaders(walletAddress, updateHmac, ts, creds),
         signal: AbortSignal.timeout(6_000),
@@ -113,7 +125,7 @@ async function getConditionalTokenBalance(
     const readPath = "/balance-allowance";
     const readHmac = await buildHmacSig(creds.secret, ts, "GET", readPath);
     const res = await fetch(
-      `${POLYMARKET_API_HOST}${readPath}?asset_type=1&token_id=${tokenId}`,
+      `${POLYMARKET_API_HOST}${readPath}?asset_type=1&token_id=${hexId}`,
       {
         headers: makeAuthHeaders(walletAddress, readHmac, ts, creds),
         signal: AbortSignal.timeout(8_000),
