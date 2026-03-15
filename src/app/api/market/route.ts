@@ -293,7 +293,18 @@ export async function GET() {
   try {
     const meta   = await fetchMeta();
     const prices = await fetchLivePrices(meta.yesTokenId);
-    const data: MarketData = { ...meta, ...prices };
+
+    // Always append the current live price as the final history point so the
+    // chart end-point reflects real-time CLOB data, not stale cached history.
+    const nowSec     = Math.floor(Date.now() / 1000);
+    const livePoint  = { t: nowSec, p: prices.yesPrice };
+    const history    = meta.priceHistory ?? [];
+    const lastT      = history.length > 0 ? history[history.length - 1].t : 0;
+    const priceHistory = lastT === nowSec
+      ? [...history.slice(0, -1), livePoint]   // replace same-second bucket
+      : [...history, livePoint];               // append new point
+
+    const data: MarketData = { ...meta, priceHistory, ...prices };
     return Response.json(data, { headers: { "Cache-Control": "no-store" } });
   } catch (err: unknown) {
     console.error("[/api/market]", err);

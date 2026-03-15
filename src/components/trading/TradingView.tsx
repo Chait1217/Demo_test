@@ -115,6 +115,16 @@ export function TradingView() {
       if (!prepRes.ok) throw new Error(await prepRes.text() || `Prepare error ${prepRes.status}`);
       const { orderStruct, exchangeAddress, l1Timestamp, l1Nonce } = await prepRes.json();
 
+      // ── Step 1b: Hard balance check against actual makerAmount ────────────
+      // makerAmount is in USDC.e micro-units (6 decimals).  Check before any
+      // wallet prompt so the user gets a clear error instead of a CLOB 400.
+      const makerAmountUsdc = Number(BigInt(orderStruct.makerAmount as string)) / 1e6;
+      if (rawBalance < makerAmountUsdc) {
+        throw new Error(
+          `Insufficient USDC.e balance — need $${makerAmountUsdc.toFixed(2)}, wallet has $${rawBalance.toFixed(2)}`
+        );
+      }
+
       // ── Step 2: Ensure USDC.e allowance for both Polymarket exchange contracts ──
       // We approve both the standard CTF exchange and the neg-risk exchange because
       // the CLOB checks whichever one governs the token, and the neg-risk API lookup
