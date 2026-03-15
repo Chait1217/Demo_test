@@ -81,6 +81,7 @@ export function TradingView() {
   const [submitting, setSubmitting] = useState(false);
   const [submitStep, setSubmitStep] = useState<string>("");
   const [closing, setClosing]       = useState<string | null>(null);
+  const [confirmClose, setConfirmClose] = useState<string | null>(null);
   const [syncing, setSyncing]       = useState(false);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
@@ -604,29 +605,55 @@ export function TradingView() {
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {openPositions.map((p) => (
-              <div key={p.id} style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
+            {openPositions.map((p) => {
+              const exitPx    = p.side === "YES" ? yesPrice : noPrice;
+              const grossPnl  = p.entryPrice > 0 ? p.notional * (exitPx / p.entryPrice - 1) : 0;
+              const netPnl    = grossPnl - (p.fees?.closeFee ?? 0);
+              const pnlPct    = p.collateral > 0 ? (netPnl / p.collateral) * 100 : 0;
+              const pnlColor  = netPnl >= 0 ? "var(--yes-color)" : "var(--danger)";
+              const isConfirming = confirmClose === p.id;
+              return (
+              <div key={p.id} style={{ background: "var(--surface-2)", border: `1px solid ${isConfirming ? "var(--warn)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <span className={`tag tag-${p.side.toLowerCase()}`}>{p.side}</span>
                     <span className="tag tag-open">OPEN</span>
                     <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)" }}>{p.leverage.toFixed(1)}x leverage</span>
                   </div>
-                  <button
-                    className="btn-danger"
-                    style={{ padding: "7px 16px", fontSize: 12 }}
-                    disabled={closing === p.id}
-                    onClick={() => closePosition(p.id, p.borrowed)}
-                  >
-                    {closing === p.id ? "Closing…" : "✕ Close Position"}
-                  </button>
+                  {isConfirming ? (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        className="btn-danger"
+                        style={{ padding: "7px 14px", fontSize: 12 }}
+                        disabled={closing === p.id}
+                        onClick={() => { setConfirmClose(null); closePosition(p.id, p.borrowed); }}
+                      >
+                        {closing === p.id ? "Closing…" : "Confirm Close"}
+                      </button>
+                      <button
+                        style={{ padding: "7px 12px", fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600, background: "transparent", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-2)", cursor: "pointer" }}
+                        onClick={() => setConfirmClose(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      className="btn-danger"
+                      style={{ padding: "7px 16px", fontSize: 12 }}
+                      disabled={closing === p.id}
+                      onClick={() => setConfirmClose(p.id)}
+                    >
+                      {closing === p.id ? "Closing…" : "✕ Close Position"}
+                    </button>
+                  )}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
                   {[
-                    { label: "Entry",      value: p.entryPrice > 0 ? `$${p.entryPrice.toFixed(4)}` : "N/A" },
-                    { label: "Collateral", value: `$${p.collateral.toFixed(2)}`  },
-                    { label: "Borrowed",   value: `$${p.borrowed.toFixed(2)}`    },
-                    { label: "Size",       value: `$${p.notional.toFixed(2)}`    },
+                    { label: "Entry Price", value: p.entryPrice > 0 ? `$${p.entryPrice.toFixed(4)}` : "N/A" },
+                    { label: "Exit Price",  value: <span style={{ color: "var(--text-1)", fontWeight: 600 }}>${exitPx.toFixed(4)}</span> },
+                    { label: "Collateral",  value: `$${p.collateral.toFixed(2)}` },
+                    { label: "Size",        value: `$${p.notional.toFixed(2)}` },
                   ].map(({ label, value }) => (
                     <div key={label}>
                       <div className="metric-label" style={{ marginBottom: 3 }}>{label}</div>
@@ -634,6 +661,35 @@ export function TradingView() {
                     </div>
                   ))}
                 </div>
+                <div style={{ marginTop: 10, background: "var(--surface-3)", borderRadius: 8, padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div className="metric-label" style={{ marginBottom: 3 }}>Unrealized PnL</div>
+                    <div style={{ fontFamily: "var(--mono)", fontSize: 18, fontWeight: 700, color: pnlColor }}>
+                      {netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)}
+                      <span style={{ fontSize: 12, marginLeft: 8, opacity: 0.8 }}>({pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%)</span>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="metric-label" style={{ marginBottom: 3 }}>Borrowed</div>
+                    <div className="metric-value-sm">${p.borrowed.toFixed(2)}</div>
+                  </div>
+                </div>
+                {isConfirming && (
+                  <div style={{ marginTop: 10, background: "rgba(255,180,0,0.07)", border: "1px solid rgba(255,180,0,0.25)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--warn)", fontWeight: 600, marginBottom: 6 }}>Close summary</div>
+                    {[
+                      { label: "Exit at",        value: `$${exitPx.toFixed(4)}` },
+                      { label: "Est. proceeds",  value: `$${(p.notional * exitPx / (p.entryPrice || 1)).toFixed(2)}` },
+                      { label: "Close fee",      value: `-$${(p.fees?.closeFee ?? 0).toFixed(4)}` },
+                      { label: "Net PnL",        value: `${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%)` },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="summary-row">
+                        <span className="summary-label">{label}</span>
+                        <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-1)" }}>{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>
                     Opened {new Date(p.openedAt).toLocaleString()}
@@ -644,7 +700,8 @@ export function TradingView() {
                   </span>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
