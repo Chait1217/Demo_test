@@ -8,7 +8,7 @@ import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
 import { usePositions, addPosition, closePositionLocal } from "@/hooks/usePositions";
 import { computePositionPreview } from "@/lib/leverage";
-import { USDCe_ADDRESS } from "@/lib/constants";
+import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS } from "@/lib/constants";
 
 const ERC20_APPROVE_ABI = [
   { name: "allowance", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
@@ -115,26 +115,33 @@ export function TradingView() {
       if (!prepRes.ok) throw new Error(await prepRes.text() || `Prepare error ${prepRes.status}`);
       const { orderStruct, exchangeAddress, l1Timestamp, l1Nonce } = await prepRes.json();
 
-      // ── Step 2: Ensure USDC.e allowance for the CTF Exchange ─────────────
+      // ── Step 2: Ensure USDC.e allowance for both Polymarket exchange contracts ──
+      // We approve both the standard CTF exchange and the neg-risk exchange because
+      // the CLOB checks whichever one governs the token, and the neg-risk API lookup
+      // can fail causing us to use the wrong address otherwise.
       setSubmitStep("Checking USDC.e allowance…");
       const needed = BigInt(orderStruct.makerAmount as string);
-      const currentAllowance = await publicClient!.readContract({
-        address:      USDCe_ADDRESS,
-        abi:          ERC20_APPROVE_ABI,
-        functionName: "allowance",
-        args:         [address, exchangeAddress as `0x${string}`],
-      }) as bigint;
+      const MAX_UINT256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
 
-      if (currentAllowance < needed) {
-        setSubmitStep("Approve USDC.e spend… (wallet prompt)");
-        const approveTx = await writeContractAsync({
+      for (const spender of [CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS]) {
+        const currentAllowance = await publicClient!.readContract({
           address:      USDCe_ADDRESS,
           abi:          ERC20_APPROVE_ABI,
-          functionName: "approve",
-          args:         [exchangeAddress as `0x${string}`, BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")],
-        });
-        setSubmitStep("Waiting for approval confirmation…");
-        await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+          functionName: "allowance",
+          args:         [address, spender],
+        }) as bigint;
+
+        if (currentAllowance < needed) {
+          setSubmitStep(`Approve USDC.e spend… (wallet prompt)`);
+          const approveTx = await writeContractAsync({
+            address:      USDCe_ADDRESS,
+            abi:          ERC20_APPROVE_ABI,
+            functionName: "approve",
+            args:         [spender, MAX_UINT256],
+          });
+          setSubmitStep("Waiting for approval confirmation…");
+          await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+        }
       }
 
       // ── Step 3: Sign the Polymarket L1 auth message (wallet popup #1) ─────

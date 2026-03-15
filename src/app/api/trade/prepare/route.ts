@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
     const { makerAmount, takerAmount } = getBuyAmounts(tokenCount, price);
 
     const [exchangeAddress, salt, l1Timestamp] = await Promise.all([
-      getExchangeAddress(tokenId),
+      getExchangeAddress(tokenId).then(addr => { console.log(`[prepare] tokenId=${tokenId.slice(0,10)}… exchange=${addr}`); return addr; }),
       Promise.resolve(Math.round(Math.random() * Date.now()).toString()),
       Promise.resolve(Math.floor(Date.now() / 1000)),
     ]);
