@@ -375,11 +375,9 @@ export function TradingView() {
         }
       }
 
-      // Immediately update localStorage — UI reflects change instantly
-      closePositionLocal(positionId);
-
-      // Cancel (or SELL if filled) on Polymarket + repay vault
-      fetch("/api/trade/close", {
+      // Cancel (or SELL if filled) on Polymarket + repay vault — AWAIT so we only
+      // mark the position closed after the server confirms success
+      const closeRes = await fetch("/api/trade/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -392,9 +390,16 @@ export function TradingView() {
           sellOrderStruct,
           sellOrderSignature,
         }),
-      }).catch(() => { /* ignore network errors — position already closed locally */ });
+      });
 
-      setSuccess("Position closed successfully.");
+      if (!closeRes.ok) {
+        const errText = await closeRes.text();
+        throw new Error(`Close failed (${closeRes.status}): ${errText}`);
+      }
+
+      // Only mark CLOSED locally after server confirms the SELL was posted
+      closePositionLocal(positionId);
+      setSuccess("Position closed — SELL order submitted to Polymarket.");
     } catch (e: any) {
       setError(e.message);
     } finally {

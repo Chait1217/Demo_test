@@ -171,21 +171,33 @@ export async function POST(req: NextRequest) {
     if (!orderId) return new Response("Missing orderId", { status: 400 });
 
     // ── 1. Try cancel, fall back to SELL if order was already filled ──────────
-    const isSimulated = orderId.startsWith("sim_") || orderId.startsWith("placed_");
+    // "balance-..." IDs are synthetic recovery IDs — there is no order to cancel,
+    // skip straight to posting the SELL order.
+    const isSimulated  = orderId.startsWith("sim_") || orderId.startsWith("placed_");
+    const isRecoveryId = orderId.startsWith("balance-");
+
     if (!isSimulated && walletAddress && l1Signature && l1Timestamp != null) {
-      try {
-        const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce ?? 0);
+      const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce ?? 0);
 
-        const cancelled = await cancelOrder(walletAddress, creds, orderId);
+      // Only attempt cancel for real Polymarket order IDs
+      let cancelled = false;
+      if (!isRecoveryId) {
+        cancelled = await cancelOrder(walletAddress, creds, orderId);
+      }
 
-        if (!cancelled && sellOrderStruct && sellOrderSignature) {
-          // Order was filled — post a SELL order to recover USDC
+      if (!cancelled) {
+        if (sellOrderStruct && sellOrderSignature) {
+          // Order was filled (or this is a balance-recovery) — post a SELL to recover USDC
           const sellWithSig = { ...sellOrderStruct, signature: sellOrderSignature };
           const sellResp = await postSellOrder(walletAddress, creds, sellWithSig);
           console.log("[close] SELL order posted:", sellResp);
+        } else if (!isRecoveryId) {
+          // Real order ID but no SELL order provided — cancel succeeded or order expired
+          console.log("[close] order cancelled / no SELL needed for:", orderId);
+        } else {
+          // Recovery ID but no SELL order — client didn't build one (missing tokenId etc.)
+          throw new Error("Recovery close requires a signed SELL order but none was provided. Make sure tokenId and tokenCount are set on the position.");
         }
-      } catch (e: any) {
-        console.warn("[close] close flow error (non-fatal):", e.message);
       }
     }
 
