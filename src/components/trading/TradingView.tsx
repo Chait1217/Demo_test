@@ -404,6 +404,70 @@ export function TradingView() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
+      {/* ── Open Positions ─────────────────────────────────── */}
+      <div className="card" style={{ padding: 20 }}>
+        <div className="card-header">
+          <div className="metric-label">Open Positions</div>
+          <div className={`pill ${openPositions.length > 0 ? "pill-live" : ""}`}>
+            {openPositions.length > 0 ? `${openPositions.length} Active` : "None"}
+          </div>
+        </div>
+
+        {!isConnected ? (
+          <div style={{ textAlign: "center", padding: "32px 20px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>Connect wallet to see your open positions</div>
+          </div>
+        ) : openPositions.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "32px 20px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>No open positions — open one below</div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {openPositions.map((p) => (
+              <div key={p.id} style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span className={`tag tag-${p.side.toLowerCase()}`}>{p.side}</span>
+                    <span className="tag tag-open">OPEN</span>
+                    <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)" }}>{p.leverage.toFixed(1)}x leverage</span>
+                  </div>
+                  <button
+                    className="btn-danger"
+                    style={{ padding: "7px 16px", fontSize: 12 }}
+                    disabled={closing === p.id}
+                    onClick={() => closePosition(p.id, p.borrowed)}
+                  >
+                    {closing === p.id ? "Closing…" : "✕ Close Position"}
+                  </button>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+                  {[
+                    { label: "Entry",      value: `$${p.entryPrice.toFixed(4)}` },
+                    { label: "Collateral", value: `$${p.collateral.toFixed(2)}`  },
+                    { label: "Borrowed",   value: `$${p.borrowed.toFixed(2)}`    },
+                    { label: "Size",       value: `$${p.notional.toFixed(2)}`    },
+                  ].map(({ label, value }) => (
+                    <div key={label}>
+                      <div className="metric-label" style={{ marginBottom: 3 }}>{label}</div>
+                      <div className="metric-value-sm">{value}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>
+                    Opened {new Date(p.openedAt).toLocaleString()}
+                  </span>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>·</span>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>
+                    ID: {p.id}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* ── Market Header ─────────────────────────────────── */}
       <div className="card" style={{ padding: 20 }}>
         <div className="card-header">
@@ -582,69 +646,6 @@ export function TradingView() {
         )}
       </div>
 
-      {/* ── Open Positions ─────────────────────────────────── */}
-      <div className="card" style={{ padding: 20 }}>
-        <div className="card-header">
-          <div className="metric-label">Open Positions</div>
-          <div className={`pill ${openPositions.length > 0 ? "pill-live" : ""}`}>
-            {openPositions.length > 0 ? `${openPositions.length} Active` : "None"}
-          </div>
-        </div>
-
-        {!isConnected ? (
-          <div style={{ textAlign: "center", padding: "32px 20px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>Connect wallet to see your open positions</div>
-          </div>
-        ) : openPositions.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "32px 20px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>No open positions — open one above</div>
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {openPositions.map((p) => (
-              <div key={p.id} style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <span className={`tag tag-${p.side.toLowerCase()}`}>{p.side}</span>
-                    <span className="tag tag-open">OPEN</span>
-                    <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)" }}>{p.leverage.toFixed(1)}x leverage</span>
-                  </div>
-                  <button
-                    className="btn-danger"
-                    style={{ padding: "7px 16px", fontSize: 12 }}
-                    disabled={closing === p.id}
-                    onClick={() => closePosition(p.id, p.borrowed)}
-                  >
-                    {closing === p.id ? "Closing…" : "✕ Close Position"}
-                  </button>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-                  {[
-                    { label: "Entry",      value: `$${p.entryPrice.toFixed(4)}` },
-                    { label: "Collateral", value: `$${p.collateral.toFixed(2)}`  },
-                    { label: "Borrowed",   value: `$${p.borrowed.toFixed(2)}`    },
-                    { label: "Size",       value: `$${p.notional.toFixed(2)}`    },
-                  ].map(({ label, value }) => (
-                    <div key={label}>
-                      <div className="metric-label" style={{ marginBottom: 3 }}>{label}</div>
-                      <div className="metric-value-sm">{value}</div>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>
-                    Opened {new Date(p.openedAt).toLocaleString()}
-                  </span>
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>·</span>
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>
-                    ID: {p.id}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
 
     </div>
   );
