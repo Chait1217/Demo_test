@@ -18,6 +18,7 @@ const ERC20_APPROVE_ABI = [
 const ERC1155_APPROVAL_ABI = [
   { name: "isApprovedForAll", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "operator", type: "address" }], outputs: [{ name: "", type: "bool" }] },
   { name: "setApprovalForAll", type: "function", stateMutability: "nonpayable", inputs: [{ name: "operator", type: "address" }, { name: "approved", type: "bool" }], outputs: [] },
+  { name: "balanceOf",         type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "id", type: "uint256" }],         outputs: [{ name: "", type: "uint256" }] },
 ] as const;
 
 type Side = "YES" | "NO";
@@ -337,10 +338,18 @@ export function TradingView() {
           const currentPrice = pos.side === "YES" ? yesPrice : noPrice;
           // Round to 0.01 tick size — same rule the CLOB enforces on price = takerAmount/makerAmount
           const tickPrice = Math.round(currentPrice * 100) / 100 || 0.01;
-          // makerAmount = tokens we give  → must be multiple of 10_000 (max 2 dp in token units)
-          // takerAmount = USDC we receive → must be multiple of 100   (max 4 dp in USDC units)
-          const makerAmountRaw = (Math.round(Math.round(pos.tokenCount * 1_000_000) / 10_000) * 10_000).toString();
-          const takerAmountRaw = (Math.round((Number(makerAmountRaw) / 1_000_000) * tickPrice * 1_000_000 / 100) * 100).toString();
+
+          // Read the exact on-chain balance so we never try to sell more than we hold.
+          // makerAmount must be a multiple of 10_000 (max 2 dp in token units) → floor, not round.
+          // takerAmount must be a multiple of 100   (max 4 dp in USDC  units) → derived from floored maker.
+          const onChainBalance = await publicClient!.readContract({
+            address:      CTF_TOKEN_ADDRESS,
+            abi:          ERC1155_APPROVAL_ABI,
+            functionName: "balanceOf",
+            args:         [address as `0x${string}`, BigInt(pos.tokenId)],
+          }) as bigint;
+          const makerAmountRaw = (BigInt(Math.floor(Number(onChainBalance) / 10_000)) * 10_000n).toString();
+          const takerAmountRaw = (Math.floor((Number(makerAmountRaw) / 1_000_000) * tickPrice * 1_000_000 / 100) * 100).toString();
           const sellSalt       = Math.round(Math.random() * Date.now()).toString();
 
           sellOrderStruct = {
