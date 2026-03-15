@@ -41,19 +41,20 @@ async function fetchMarket(): Promise<MarketData> {
 
 export function useMarket() {
   const { data, isLoading } = useQuery<MarketData>({
-    queryKey:        ["market"],
-    queryFn:         fetchMarket,
-    refetchInterval: 60_000,  // refresh metadata every 60s — live prices come from WS
-    staleTime:       55_000,
-    retry:           3,
-    retryDelay:      2_000,
-    initialData:     DEFAULT,
+    queryKey:            ["market"],
+    queryFn:             fetchMarket,
+    refetchInterval:     60_000,  // refresh metadata every 60s — live prices come from polling
+    staleTime:           30_000,
+    retry:               3,
+    retryDelay:          2_000,
+    initialData:         DEFAULT,
+    initialDataUpdatedAt: 0,     // treat initial data as immediately stale → fetch on mount
   });
 
-  // WebSocket live price feed — updates on every order book change (ms-level)
+  // Fast price polling — /api/prices fetches fresh CLOB bid/ask every 500ms
   const live = useLivePrices(data?.yesTokenId || undefined);
 
-  // Merge: WebSocket prices override the HTTP-fetched snapshot when available
+  // Merge: live prices override the HTTP-fetched snapshot when available
   const merged: MarketData = live
     ? { ...data!, yesPrice: live.yesPrice, noPrice: live.noPrice, spread: live.spread }
     : data!;
