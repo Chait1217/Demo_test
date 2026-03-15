@@ -1,7 +1,6 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useLivePrices } from "./useLivePrices";
 
 export interface MarketData {
   question:     string;
@@ -43,21 +42,13 @@ export function useMarket() {
   const { data, isLoading } = useQuery<MarketData>({
     queryKey:            ["market"],
     queryFn:             fetchMarket,
-    refetchInterval:     60_000,  // refresh metadata every 60s — live prices come from polling
-    staleTime:           30_000,
+    refetchInterval:     2_000,   // poll every 2s — server fetches fresh CLOB prices each time
+    staleTime:           0,       // always consider data stale so refetch fires reliably
     retry:               3,
-    retryDelay:          2_000,
+    retryDelay:          1_000,
     initialData:         DEFAULT,
     initialDataUpdatedAt: 0,     // treat initial data as immediately stale → fetch on mount
   });
 
-  // Fast price polling — /api/prices fetches fresh CLOB bid/ask every 500ms
-  const live = useLivePrices(data?.yesTokenId || undefined);
-
-  // Merge: live prices override the HTTP-fetched snapshot when available
-  const merged: MarketData = live
-    ? { ...data!, yesPrice: live.yesPrice, noPrice: live.noPrice, spread: live.spread }
-    : data!;
-
-  return { data: merged, isLoading };
+  return { data: data!, isLoading };
 }

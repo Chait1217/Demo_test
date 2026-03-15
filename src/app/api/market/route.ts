@@ -44,7 +44,6 @@ const FALLBACK: MarketData = {
 let cachedMeta: Omit<MarketData, "yesPrice" | "noPrice" | "spread"> | null = null;
 let metaExpiry = 0;
 let cachedPrices = { yesPrice: 0.5, noPrice: 0.5, spread: 0 };
-let priceExpiry  = 0;
 
 type GammaMarket = Record<string, unknown>;
 
@@ -238,28 +237,21 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
   };
   metaExpiry = now + 120_000;
 
-  // Seed prices immediately from Gamma outcomePrices (no CLOB round-trip needed)
-  if (market) {
+  // Seed cachedPrices from Gamma only as a last-resort fallback (no expiry override)
+  if (market && cachedPrices.yesPrice === 0.5) {
     const gp = parseOutcomePrices(market);
     if (gp) {
-      cachedPrices = {
-        yesPrice: parseFloat(gp.yes.toFixed(4)),
-        noPrice:  parseFloat(gp.no.toFixed(4)),
-        spread:   0,
-      };
-      priceExpiry = now + 30_000;
-      console.log(`[market] Gamma prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
+      cachedPrices = { yesPrice: parseFloat(gp.yes.toFixed(4)), noPrice: parseFloat(gp.no.toFixed(4)), spread: 0 };
+      console.log(`[market] Gamma seed prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
     }
   }
 
   return cachedMeta;
 }
 
-// Fetch live bid/ask from CLOB — cached 8 seconds
+// Fetch live bid/ask from CLOB — no server-side caching so every client poll gets fresh data
 async function fetchLivePrices(yesTokenId: string) {
   if (!yesTokenId) return cachedPrices;
-  const now = Date.now();
-  if (now < priceExpiry) return cachedPrices;
 
   try {
     const [sellRes, buyRes] = await Promise.all([
@@ -277,11 +269,10 @@ async function fetchLivePrices(yesTokenId: string) {
           noPrice:  parseFloat((1 - mid).toFixed(4)),
           spread:   parseFloat((ask - bid).toFixed(4)),
         };
-        priceExpiry = now + 8_000;
         console.log(`[market] Live CLOB prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
       }
     }
-  } catch { /* keep cached */ }
+  } catch { /* keep last good value */ }
 
   return cachedPrices;
 }
