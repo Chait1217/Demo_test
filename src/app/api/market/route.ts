@@ -255,24 +255,36 @@ async function fetchLivePrices(yesTokenId: string) {
 
   try {
     const [sellRes, buyRes] = await Promise.all([
-      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=sell`, { signal: AbortSignal.timeout(5_000) }),
-      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=buy`,  { signal: AbortSignal.timeout(5_000) }),
+      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=SELL`, { signal: AbortSignal.timeout(5_000) }),
+      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=BUY`,  { signal: AbortSignal.timeout(5_000) }),
     ]);
 
-    if (sellRes.ok && buyRes.ok) {
-      const bid = parseFloat((await sellRes.json()).price ?? "0");
-      const ask = parseFloat((await buyRes.json()).price  ?? "0");
-      if (bid > 0 && ask > 0 && bid <= ask && ask <= 1) {
-        const mid = (bid + ask) / 2;
-        cachedPrices = {
-          yesPrice: parseFloat(mid.toFixed(4)),
-          noPrice:  parseFloat((1 - mid).toFixed(4)),
-          spread:   parseFloat((ask - bid).toFixed(4)),
-        };
-        console.log(`[market] Live CLOB prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
-      }
+    if (!sellRes.ok || !buyRes.ok) {
+      console.warn(`[market] CLOB price HTTP error — sell:${sellRes.status} buy:${buyRes.status}`);
+      return cachedPrices;
     }
-  } catch { /* keep last good value */ }
+
+    const sellData = await sellRes.json();
+    const buyData  = await buyRes.json();
+    console.log(`[market] CLOB raw — sell:${JSON.stringify(sellData)} buy:${JSON.stringify(buyData)}`);
+
+    const bid = parseFloat(String(sellData.price ?? sellData.price ?? "0"));
+    const ask = parseFloat(String(buyData.price  ?? buyData.price  ?? "0"));
+
+    if (bid > 0 && ask > 0 && bid <= ask + 0.01 && ask <= 1.01) {
+      const mid = (bid + ask) / 2;
+      cachedPrices = {
+        yesPrice: parseFloat(Math.min(mid, 1).toFixed(4)),
+        noPrice:  parseFloat(Math.max(1 - mid, 0).toFixed(4)),
+        spread:   parseFloat(Math.abs(ask - bid).toFixed(4)),
+      };
+      console.log(`[market] Live CLOB prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
+    } else {
+      console.warn(`[market] CLOB prices rejected — bid:${bid} ask:${ask}`);
+    }
+  } catch (e) {
+    console.warn(`[market] CLOB fetch error — ${e}`);
+  }
 
   return cachedPrices;
 }
