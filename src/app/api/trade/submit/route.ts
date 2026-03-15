@@ -209,6 +209,29 @@ export async function POST(req: NextRequest) {
     // ── 3. Derive API creds from user's L1 signature ─────────────────────────
     const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce);
 
+    // ── 3b. Tell the CLOB to re-read on-chain balance/allowance ──────────────
+    // The CLOB caches the maker's USDC.e balance and allowance. A fresh approval
+    // (or any other on-chain change) is invisible to it until we call this endpoint.
+    // Without this step, even a valid approval gets rejected as "not enough allowance".
+    try {
+      const baTs   = String(Math.floor(Date.now() / 1000));
+      const baPath = "/balance-allowance/update";
+      const baHmac = await buildHmacSig(creds.secret, baTs, "GET", baPath);
+      await fetch(`${POLYMARKET_API_HOST}${baPath}?asset_type=0&signature_type=0`, {
+        headers: {
+          POLY_ADDRESS:    walletAddress,
+          POLY_SIGNATURE:  baHmac,
+          POLY_TIMESTAMP:  baTs,
+          POLY_API_KEY:    creds.key,
+          POLY_PASSPHRASE: creds.passphrase,
+        },
+        signal: AbortSignal.timeout(8_000),
+      });
+      console.log("[submit] CLOB balance-allowance cache refreshed");
+    } catch (e: any) {
+      console.warn("[submit] balance-allowance refresh failed (non-fatal):", e.message);
+    }
+
     // ── 4. Post the pre-signed order ─────────────────────────────────────────
     const orderWithSig = { ...orderStruct, signature: orderSignature };
     const orderResp    = await postSignedOrder(walletAddress, creds, orderWithSig);
