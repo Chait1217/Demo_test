@@ -100,7 +100,7 @@ async function getConditionalTokenBalance(
     const updatePath = "/balance-allowance/update";
     const updateHmac = await buildHmacSig(creds.secret, ts, "GET", updatePath);
     await fetch(
-      `${POLYMARKET_API_HOST}${updatePath}?asset_type=CONDITIONAL_TOKEN&token_id=${tokenId}`,
+      `${POLYMARKET_API_HOST}${updatePath}?asset_type=1&token_id=${tokenId}`,
       {
         headers: makeAuthHeaders(walletAddress, updateHmac, ts, creds),
         signal: AbortSignal.timeout(6_000),
@@ -113,7 +113,7 @@ async function getConditionalTokenBalance(
     const readPath = "/balance-allowance";
     const readHmac = await buildHmacSig(creds.secret, ts, "GET", readPath);
     const res = await fetch(
-      `${POLYMARKET_API_HOST}${readPath}?asset_type=CONDITIONAL_TOKEN&token_id=${tokenId}`,
+      `${POLYMARKET_API_HOST}${readPath}?asset_type=1&token_id=${tokenId}`,
       {
         headers: makeAuthHeaders(walletAddress, readHmac, ts, creds),
         signal: AbortSignal.timeout(8_000),
