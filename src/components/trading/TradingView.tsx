@@ -314,9 +314,10 @@ export function TradingView() {
           const currentPrice = pos.side === "YES" ? yesPrice : noPrice;
           // Round to 0.01 tick size — same rule the CLOB enforces on price = takerAmount/makerAmount
           const tickPrice = Math.round(currentPrice * 100) / 100 || 0.01;
-          // makerAmount = tokens we give; takerAmount = USDC we receive
-          const makerAmountRaw = Math.round(pos.tokenCount * 1_000_000).toString();
-          const takerAmountRaw = Math.round(pos.tokenCount * tickPrice  * 1_000_000).toString();
+          // makerAmount = tokens we give  → must be multiple of 10_000 (max 2 dp in token units)
+          // takerAmount = USDC we receive → must be multiple of 100   (max 4 dp in USDC units)
+          const makerAmountRaw = (Math.round(Math.round(pos.tokenCount * 1_000_000) / 10_000) * 10_000).toString();
+          const takerAmountRaw = (Math.round((Number(makerAmountRaw) / 1_000_000) * tickPrice * 1_000_000 / 100) * 100).toString();
           const sellSalt       = Math.round(Math.random() * Date.now()).toString();
 
           sellOrderStruct = {
