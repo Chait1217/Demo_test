@@ -124,8 +124,11 @@ async function getConditionalTokenBalance(
     );
     if (res.ok) {
       const data = await res.json();
-      const balance = Number(data.balance ?? data.balance_allowance?.balance ?? 0);
-      console.log(`[orders] conditional balance for token ${tokenId.slice(0, 10)}…: ${balance}`);
+      // CLOB returns balance as raw 6-decimal integer (e.g. "1539995" = 1.539995 tokens).
+      // Divide by 1e6 to get the human-readable token count that TradingView expects.
+      const rawBalance = Number(data.balance ?? data.balance_allowance?.balance ?? 0);
+      const balance = rawBalance / 1_000_000;
+      console.log(`[orders] conditional balance for token ${tokenId.slice(0, 10)}…: raw=${rawBalance} → ${balance} tokens`);
       return balance;
     }
     console.warn(`[orders] balance-allowance returned ${res.status}: ${await res.text()}`);
