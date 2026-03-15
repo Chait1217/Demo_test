@@ -1,9 +1,9 @@
 import { NextRequest } from "next/server";
 import { Address, formatUnits } from "viem";
-import { createPublicClient, http } from "viem";
-import { POLYGON_CHAIN, USDCe_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
-// Note: vault borrow is now executed client-side (TradingView.tsx) so the
-// borrowed USDC goes directly to the user's wallet, not the server wallet.
+import { createPublicClient, createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { POLYGON_CHAIN, USDCe_ADDRESS, VAULT_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
+import { leveragedVaultAbi } from "@/lib/vaultAbi";
 import { computePositionPreview } from "@/lib/leverage";
 import { recordOpenPosition } from "@/server/positionsStore";
 
@@ -186,10 +186,57 @@ export async function POST(req: NextRequest) {
       return new Response(`Insufficient USDC.e balance. Need $${collateral.toFixed(2)}.`, { status: 400 });
     }
 
-    // vault.borrow() is executed client-side (from the user's own wallet) so the
-    // borrowed USDC lands in the user's wallet before the order is placed.
-
     const preview = computePositionPreview({ collateral, leverage }, 0);
+
+    // ── 2. Borrow leveraged portion from vault (server is the marginEngine) ──
+    // vault.borrow(amount) is onlyEngine — the server wallet must call it, not
+    // the user. After borrowing, we forward the USDC to the user's wallet so
+    // the full notional is available when Polymarket fills the BUY order.
+    const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+    const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
+    const serverPk  = process.env.POLYMARKET_PRIVATE_KEY;
+
+    if (hasVault && preview.borrowed > 0 && serverPk) {
+      try {
+        const borrowRaw  = BigInt(Math.round(preview.borrowed * 1_000_000));
+        const account    = privateKeyToAccount(serverPk as `0x${string}`);
+        const rpcUrl     = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
+        const walletClient = createWalletClient({
+          account,
+          chain:     POLYGON_CHAIN,
+          transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
+        });
+
+        // Step 1: vault.borrow(amount) → USDC sent to server wallet (marginEngine)
+        const borrowHash = await walletClient.writeContract({
+          address:      VAULT_ADDRESS,
+          abi:          leveragedVaultAbi,
+          functionName: "borrow",
+          args:         [borrowRaw],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: borrowHash, timeout: 30_000 });
+
+        // Step 2: Forward borrowed USDC from server wallet → user's wallet
+        const ERC20_TRANSFER_ABI = [{
+          name: "transfer", type: "function", stateMutability: "nonpayable",
+          inputs:  [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
+          outputs: [{ name: "", type: "bool" }],
+        }] as const;
+        const transferHash = await walletClient.writeContract({
+          address:      USDCe_ADDRESS,
+          abi:          ERC20_TRANSFER_ABI,
+          functionName: "transfer",
+          args:         [walletAddress as `0x${string}`, borrowRaw],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: transferHash, timeout: 30_000 });
+
+        console.log(`[submit] vault borrow + forward: $${preview.borrowed.toFixed(2)} USDC → ${walletAddress}`);
+      } catch (e: any) {
+        console.warn("[submit] vault borrow failed (non-fatal):", e.message);
+        // Non-fatal: the notional-sized order will likely be rejected by Polymarket
+        // if the user doesn't have enough USDC, surfacing a clear error.
+      }
+    }
 
     // ── 3. Derive API creds from user's L1 signature ─────────────────────────
     const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce);

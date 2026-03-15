@@ -8,8 +8,7 @@ import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
 import { usePositions, addPosition, updatePosition, closePositionLocal } from "@/hooks/usePositions";
 import { computePositionPreview } from "@/lib/leverage";
-import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS, CTF_TOKEN_ADDRESS, VAULT_ADDRESS } from "@/lib/constants";
-import { leveragedVaultAbi } from "@/lib/vaultAbi";
+import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS, CTF_TOKEN_ADDRESS } from "@/lib/constants";
 
 const ERC20_APPROVE_ABI = [
   { name: "allowance", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
@@ -82,6 +81,7 @@ export function TradingView() {
   const [submitting, setSubmitting] = useState(false);
   const [submitStep, setSubmitStep] = useState<string>("");
   const [closing, setClosing]       = useState<string | null>(null);
+  const [confirmClose, setConfirmClose] = useState<string | null>(null);
   const [syncing, setSyncing]       = useState(false);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
@@ -156,27 +156,14 @@ export function TradingView() {
             args:         [spender, MAX_UINT256],
           });
           setSubmitStep("Waiting for approval confirmation…");
-          await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+          await publicClient!.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
         }
       }
 
-      // ── Step 2b: Borrow leveraged portion from vault ─────────────────────
-      // The vault sends borrowed USDC directly to the user's wallet so the
-      // full notional is available when Polymarket fills the BUY order.
-      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-      const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
-      if (hasVault && preview.borrowed > 0) {
-        setSubmitStep("Borrowing from vault… (wallet prompt)");
-        const borrowRaw = BigInt(Math.round(preview.borrowed * 1_000_000));
-        const borrowTx  = await writeContractAsync({
-          address:      VAULT_ADDRESS as `0x${string}`,
-          abi:          leveragedVaultAbi,
-          functionName: "borrow",
-          args:         [borrowRaw],
-        });
-        setSubmitStep("Waiting for borrow confirmation…");
-        await publicClient!.waitForTransactionReceipt({ hash: borrowTx });
-      }
+      // ── Step 2b: vault.borrow() is onlyEngine — the SERVER handles borrowing ─
+      // The submit route calls vault.borrow() with the server's marginEngine wallet
+      // and then transfers the borrowed USDC to the user's wallet. No client action
+      // needed here; the server does it before posting the Polymarket order.
 
       // ── Step 3: Sign the Polymarket L1 auth message (wallet popup #1) ─────
       setSubmitStep("Sign to authenticate with Polymarket… (1/2)");
@@ -427,6 +414,35 @@ export function TradingView() {
         }
       }
 
+      // ── Step: Send borrowed USDC to engine wallet BEFORE calling close route ──
+      // vault.repay() is onlyEngine and uses transferFrom(engine→vault).
+      // The engine must have USDC first. The user transfers it here (before the
+      // close route), so when the server calls vault.repay() it already holds it.
+      if (!isSimulated && borrowed > 0) {
+        try {
+          const engRes = await fetch("/api/engine-address");
+          const { address: engineAddress } = await engRes.json() as { address: string | null };
+          if (engineAddress) {
+            const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
+            setSubmitStep("Sending repayment to vault engine… (wallet prompt)");
+            const ERC20_TRANSFER_ABI = [{
+              name: "transfer", type: "function", stateMutability: "nonpayable",
+              inputs:  [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
+              outputs: [{ name: "", type: "bool" }],
+            }] as const;
+            const transferTx = await writeContractAsync({
+              address:      USDCe_ADDRESS,
+              abi:          ERC20_TRANSFER_ABI,
+              functionName: "transfer",
+              args:         [engineAddress as `0x${string}`, repayRaw],
+            });
+            await publicClient!.waitForTransactionReceipt({ hash: transferTx, timeout: 60_000 });
+          }
+        } catch (repayErr: any) {
+          console.warn("[close] repay transfer non-fatal:", repayErr.message);
+        }
+      }
+
       // Cancel (or SELL if filled) on Polymarket + repay vault — AWAIT so we only
       // mark the position closed after the server confirms success
       const closeRes = await fetch("/api/trade/close", {
@@ -447,45 +463,6 @@ export function TradingView() {
       if (!closeRes.ok) {
         const errText = await closeRes.text();
         throw new Error(`Close failed (${closeRes.status}): ${errText}`);
-      }
-
-      // ── Repay vault from user's wallet ────────────────────────────────────
-      // The SELL order was just posted; for a quickly-filled market-price order
-      // the USDC is already (or imminently) back in the wallet. Attempt repay
-      // now so the vault's accounting stays in sync. If the SELL hasn't settled
-      // yet this will fail gracefully and the user can repay later.
-      if (!isSimulated && VAULT_ADDRESS && VAULT_ADDRESS !== "0x0000000000000000000000000000000000000000" && borrowed > 0) {
-        try {
-          const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
-          // Approve vault to pull back the borrowed USDC
-          const repayAllowance = await publicClient!.readContract({
-            address:      USDCe_ADDRESS,
-            abi:          ERC20_APPROVE_ABI,
-            functionName: "allowance",
-            args:         [address as `0x${string}`, VAULT_ADDRESS as `0x${string}`],
-          }) as bigint;
-          if (repayAllowance < repayRaw) {
-            setSubmitStep("Approve vault to collect repayment… (wallet prompt)");
-            const approveTx = await writeContractAsync({
-              address:      USDCe_ADDRESS,
-              abi:          ERC20_APPROVE_ABI,
-              functionName: "approve",
-              args:         [VAULT_ADDRESS as `0x${string}`, repayRaw],
-            });
-            await publicClient!.waitForTransactionReceipt({ hash: approveTx });
-          }
-          setSubmitStep("Repaying vault… (wallet prompt)");
-          const repayTx = await writeContractAsync({
-            address:      VAULT_ADDRESS as `0x${string}`,
-            abi:          leveragedVaultAbi,
-            functionName: "repay",
-            args:         [repayRaw],
-          });
-          await publicClient!.waitForTransactionReceipt({ hash: repayTx });
-        } catch (repayErr: any) {
-          // Non-fatal — SELL may not have filled yet; user retains the obligation
-          console.warn("[close] vault repay failed (non-fatal):", repayErr.message);
-        }
       }
 
       // Only mark CLOSED locally after server confirms the SELL was posted
@@ -628,29 +605,55 @@ export function TradingView() {
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {openPositions.map((p) => (
-              <div key={p.id} style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
+            {openPositions.map((p) => {
+              const exitPx    = p.side === "YES" ? yesPrice : noPrice;
+              const grossPnl  = p.entryPrice > 0 ? p.notional * (exitPx / p.entryPrice - 1) : 0;
+              const netPnl    = grossPnl - (p.fees?.closeFee ?? 0);
+              const pnlPct    = p.collateral > 0 ? (netPnl / p.collateral) * 100 : 0;
+              const pnlColor  = netPnl >= 0 ? "var(--yes-color)" : "var(--danger)";
+              const isConfirming = confirmClose === p.id;
+              return (
+              <div key={p.id} style={{ background: "var(--surface-2)", border: `1px solid ${isConfirming ? "var(--warn)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <span className={`tag tag-${p.side.toLowerCase()}`}>{p.side}</span>
                     <span className="tag tag-open">OPEN</span>
                     <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)" }}>{p.leverage.toFixed(1)}x leverage</span>
                   </div>
-                  <button
-                    className="btn-danger"
-                    style={{ padding: "7px 16px", fontSize: 12 }}
-                    disabled={closing === p.id}
-                    onClick={() => closePosition(p.id, p.borrowed)}
-                  >
-                    {closing === p.id ? "Closing…" : "✕ Close Position"}
-                  </button>
+                  {isConfirming ? (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        className="btn-danger"
+                        style={{ padding: "7px 14px", fontSize: 12 }}
+                        disabled={closing === p.id}
+                        onClick={() => { setConfirmClose(null); closePosition(p.id, p.borrowed); }}
+                      >
+                        {closing === p.id ? "Closing…" : "Confirm Close"}
+                      </button>
+                      <button
+                        style={{ padding: "7px 12px", fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600, background: "transparent", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-2)", cursor: "pointer" }}
+                        onClick={() => setConfirmClose(null)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      className="btn-danger"
+                      style={{ padding: "7px 16px", fontSize: 12 }}
+                      disabled={closing === p.id}
+                      onClick={() => setConfirmClose(p.id)}
+                    >
+                      {closing === p.id ? "Closing…" : "✕ Close Position"}
+                    </button>
+                  )}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
                   {[
-                    { label: "Entry",      value: p.entryPrice > 0 ? `$${p.entryPrice.toFixed(4)}` : "N/A" },
-                    { label: "Collateral", value: `$${p.collateral.toFixed(2)}`  },
-                    { label: "Borrowed",   value: `$${p.borrowed.toFixed(2)}`    },
-                    { label: "Size",       value: `$${p.notional.toFixed(2)}`    },
+                    { label: "Entry Price", value: p.entryPrice > 0 ? `$${p.entryPrice.toFixed(4)}` : "N/A" },
+                    { label: "Exit Price",  value: <span style={{ color: "var(--text-1)", fontWeight: 600 }}>${exitPx.toFixed(4)}</span> },
+                    { label: "Collateral",  value: `$${p.collateral.toFixed(2)}` },
+                    { label: "Size",        value: `$${p.notional.toFixed(2)}` },
                   ].map(({ label, value }) => (
                     <div key={label}>
                       <div className="metric-label" style={{ marginBottom: 3 }}>{label}</div>
@@ -658,6 +661,35 @@ export function TradingView() {
                     </div>
                   ))}
                 </div>
+                <div style={{ marginTop: 10, background: "var(--surface-3)", borderRadius: 8, padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div className="metric-label" style={{ marginBottom: 3 }}>Unrealized PnL</div>
+                    <div style={{ fontFamily: "var(--mono)", fontSize: 18, fontWeight: 700, color: pnlColor }}>
+                      {netPnl >= 0 ? "+" : ""}${netPnl.toFixed(2)}
+                      <span style={{ fontSize: 12, marginLeft: 8, opacity: 0.8 }}>({pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%)</span>
+                    </div>
+                  </div>
+                  <div style={{ textAlign: "right" }}>
+                    <div className="metric-label" style={{ marginBottom: 3 }}>Borrowed</div>
+                    <div className="metric-value-sm">${p.borrowed.toFixed(2)}</div>
+                  </div>
+                </div>
+                {isConfirming && (
+                  <div style={{ marginTop: 10, background: "rgba(255,180,0,0.07)", border: "1px solid rgba(255,180,0,0.25)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--warn)", fontWeight: 600, marginBottom: 6 }}>Close summary</div>
+                    {[
+                      { label: "Exit at",        value: `$${exitPx.toFixed(4)}` },
+                      { label: "Est. proceeds",  value: `$${(p.notional * exitPx / (p.entryPrice || 1)).toFixed(2)}` },
+                      { label: "Close fee",      value: `-$${(p.fees?.closeFee ?? 0).toFixed(4)}` },
+                      { label: "Net PnL",        value: `${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%)` },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="summary-row">
+                        <span className="summary-label">{label}</span>
+                        <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-1)" }}>{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>
                     Opened {new Date(p.openedAt).toLocaleString()}
@@ -668,7 +700,8 @@ export function TradingView() {
                   </span>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

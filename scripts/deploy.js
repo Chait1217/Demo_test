@@ -21,9 +21,10 @@ const { ethers } = require("ethers");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const PRIVATE_KEY   = process.env.DEPLOYER_PRIVATE_KEY;
-const RPC_URL       = process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com";
-const USDCe_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const PRIVATE_KEY        = process.env.DEPLOYER_PRIVATE_KEY;
+const ENGINE_PRIVATE_KEY = process.env.POLYMARKET_PRIVATE_KEY;
+const RPC_URL            = process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com";
+const USDCe_ADDRESS      = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -125,6 +126,28 @@ async function main() {
   console.log("    Address:", address);
   console.log("    Tx:     ", vault.deployTransaction.hash);
   console.log("    Explorer: https://polygonscan.com/address/" + address);
+
+  // ── Set marginEngine to the server engine wallet ───────────────────────────
+  // The vault constructor sets marginEngine = owner (deployer), but the server
+  // uses POLYMARKET_PRIVATE_KEY as the engine wallet. Fix this immediately after
+  // deployment so vault.borrow() and vault.repay() work from the server.
+  if (ENGINE_PRIVATE_KEY) {
+    const engineWallet = new ethers.Wallet(ENGINE_PRIVATE_KEY);
+    const engineAddress = engineWallet.address;
+    console.log("\nSetting marginEngine to server engine wallet:", engineAddress);
+    const vaultContract = new ethers.Contract(address, abi, wallet);
+    const tx = await vaultContract.setMarginEngine(engineAddress, {
+      maxPriorityFeePerGas: ethers.utils.parseUnits("35", "gwei"),
+      maxFeePerGas:         ethers.utils.parseUnits("150", "gwei"),
+    });
+    await tx.wait();
+    console.log("✓  marginEngine set to", engineAddress);
+  } else {
+    console.warn(
+      "\n⚠  POLYMARKET_PRIVATE_KEY not set — marginEngine left as deployer.\n" +
+      "   Run setMarginEngine(<engine-wallet>) manually before using the app."
+    );
+  }
 
   // ── Auto-patch .env.local ──────────────────────────────────────────────────
   const envPath = path.join(__dirname, "../.env.local");
