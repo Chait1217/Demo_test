@@ -6,7 +6,7 @@ import { polygon } from "wagmi/chains";
 import { useMarket } from "@/hooks/useMarket";
 import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
-import { usePositions, addPosition, closePositionLocal } from "@/hooks/usePositions";
+import { usePositions, addPosition, updatePosition, closePositionLocal } from "@/hooks/usePositions";
 import { computePositionPreview } from "@/lib/leverage";
 import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS } from "@/lib/constants";
 
@@ -454,25 +454,35 @@ export function TradingView() {
       const existingIds = new Set((positions ?? []).map((p) => p.id));
       let added = 0;
       for (const r of recovered) {
-        if (!existingIds.has(r.orderId) && r.tokenCount > 0) {
-          addPosition({
-            id:              r.orderId,
-            walletAddress:   address,
-            side:            r.side,
-            entryPrice:      r.entryPrice,
-            collateral:      parseFloat((r.tokenCount * r.entryPrice).toFixed(6)),
-            borrowed:        0,
-            notional:        parseFloat((r.tokenCount * r.entryPrice).toFixed(6)),
-            leverage:        1,
-            fees:            { openFee: 0, closeFee: 0, liquidationFee: 0 },
-            state:           "OPEN",
-            openedAt:        new Date().toISOString(),
-            tokenId:         r.tokenId,
-            tokenCount:      r.tokenCount,
-            exchangeAddress: r.exchangeAddress,
-          });
-          added++;
+        if (r.tokenCount <= 0) continue;
+        if (existingIds.has(r.orderId)) {
+          // Always overwrite balance-derived positions so a stale tokenCount gets corrected
+          if (r.orderId.startsWith("balance-")) {
+            updatePosition(r.orderId, {
+              tokenCount:      r.tokenCount,
+              tokenId:         r.tokenId,
+              exchangeAddress: r.exchangeAddress,
+            });
+          }
+          continue;
         }
+        addPosition({
+          id:              r.orderId,
+          walletAddress:   address,
+          side:            r.side,
+          entryPrice:      r.entryPrice,
+          collateral:      parseFloat((r.tokenCount * r.entryPrice).toFixed(6)),
+          borrowed:        0,
+          notional:        parseFloat((r.tokenCount * r.entryPrice).toFixed(6)),
+          leverage:        1,
+          fees:            { openFee: 0, closeFee: 0, liquidationFee: 0 },
+          state:           "OPEN",
+          openedAt:        new Date().toISOString(),
+          tokenId:         r.tokenId,
+          tokenCount:      r.tokenCount,
+          exchangeAddress: r.exchangeAddress,
+        });
+        added++;
       }
       refetchPositions();
       if (added > 0) {
