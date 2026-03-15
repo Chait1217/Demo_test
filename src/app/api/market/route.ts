@@ -211,7 +211,7 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
     try {
       const hr = await fetch(
         `${CLOB}/prices-history?market=${yesTokenId}&interval=1w&fidelity=60`,
-        { signal: AbortSignal.timeout(8_000) }
+        { cache: "no-store", signal: AbortSignal.timeout(8_000) }
       );
       if (hr.ok) {
         const json = await hr.json();
@@ -255,8 +255,8 @@ async function fetchLivePrices(yesTokenId: string) {
 
   try {
     const [sellRes, buyRes] = await Promise.all([
-      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=SELL`, { signal: AbortSignal.timeout(5_000) }),
-      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=BUY`,  { signal: AbortSignal.timeout(5_000) }),
+      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=SELL`, { cache: "no-store", signal: AbortSignal.timeout(5_000) }),
+      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=BUY`,  { cache: "no-store", signal: AbortSignal.timeout(5_000) }),
     ]);
 
     if (!sellRes.ok || !buyRes.ok) {

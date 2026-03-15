@@ -76,12 +76,13 @@ export async function POST(req: NextRequest) {
     }
 
     // Size in tokens = collateral USDC / price.
-    // The order's makerAmount must equal what the user's wallet actually holds;
-    // Polymarket checks balanceOf(maker) on-chain and rejects orders where
-    // makerAmount > balance.  Leverage is tracked in our position store but the
-    // on-chain order only uses the user's own collateral.
-    const preview    = computePositionPreview({ collateral, leverage }, 0);
-    const tokenCount = price > 0 ? collateral / price : collateral;
+    // CRITICAL: use the same rounded price that getBuyAmounts will use (2 d.p., tick size 0.01).
+    // If we divide by the raw price but multiply back by the rounded price we can get
+    // makerAmount > collateral (e.g. price=0.715 → roundedPrice=0.72, causing a 0.6% overshoot).
+    // Dividing by the rounded price first guarantees makerAmount ≤ collateral.
+    const preview      = computePositionPreview({ collateral, leverage }, 0);
+    const roundedPrice = Math.round(price * 100) / 100 || price;   // 2 d.p. = CLOB tick size
+    const tokenCount   = roundedPrice > 0 ? collateral / roundedPrice : collateral;
 
     const { makerAmount, takerAmount } = getBuyAmounts(tokenCount, price);
 
