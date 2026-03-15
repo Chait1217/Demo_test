@@ -18,11 +18,23 @@ function bufferToBase64url(buf: ArrayBuffer): string {
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_");
 }
 
-async function buildHmacSig(secret: string, ts: string, method: string, path: string): Promise<string> {
-  const message = ts + method + path;
+// NOTE: HMAC is built WITHOUT query params — matches Polymarket's CLOB client behaviour
+// (same pattern used in submit/route.ts for /balance-allowance/update)
+async function buildHmacSig(secret: string, ts: string, method: string, pathNoQuery: string): Promise<string> {
+  const message = ts + method + pathNoQuery;
   const key     = await globalThis.crypto.subtle.importKey("raw", base64ToBuffer(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sigBuf  = await globalThis.crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
   return bufferToBase64url(sigBuf);
+}
+
+function makeAuthHeaders(walletAddress: string, hmac: string, ts: string, creds: { key: string; passphrase: string }) {
+  return {
+    POLY_ADDRESS:    walletAddress,
+    POLY_SIGNATURE:  hmac,
+    POLY_TIMESTAMP:  ts,
+    POLY_API_KEY:    creds.key,
+    POLY_PASSPHRASE: creds.passphrase,
+  };
 }
 
 async function deriveApiCreds(walletAddress: string, l1Sig: string, l1Timestamp: number) {
@@ -71,6 +83,55 @@ async function getExchangeAddress(tokenId: string): Promise<string> {
   return CTF_EXCHANGE;
 }
 
+/**
+ * Query the CLOB balance-allowance endpoint for a conditional token.
+ * Returns the number of tokens held in the user's Polymarket proxy wallet,
+ * or 0 if the request fails.
+ */
+async function getConditionalTokenBalance(
+  walletAddress: string,
+  creds: { key: string; secret: string; passphrase: string },
+  tokenId: string,
+): Promise<number> {
+  const ts = String(Math.floor(Date.now() / 1000));
+
+  // Step 1: tell CLOB to refresh its cache from on-chain state
+  try {
+    const updatePath = "/balance-allowance/update";
+    const updateHmac = await buildHmacSig(creds.secret, ts, "GET", updatePath);
+    await fetch(
+      `${POLYMARKET_API_HOST}${updatePath}?asset_type=CONDITIONAL_TOKEN&token_id=${tokenId}`,
+      {
+        headers: makeAuthHeaders(walletAddress, updateHmac, ts, creds),
+        signal: AbortSignal.timeout(6_000),
+      },
+    );
+  } catch { /* non-fatal */ }
+
+  // Step 2: read the (now refreshed) balance
+  try {
+    const readPath = "/balance-allowance";
+    const readHmac = await buildHmacSig(creds.secret, ts, "GET", readPath);
+    const res = await fetch(
+      `${POLYMARKET_API_HOST}${readPath}?asset_type=CONDITIONAL_TOKEN&token_id=${tokenId}`,
+      {
+        headers: makeAuthHeaders(walletAddress, readHmac, ts, creds),
+        signal: AbortSignal.timeout(8_000),
+      },
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const balance = Number(data.balance ?? data.balance_allowance?.balance ?? 0);
+      console.log(`[orders] conditional balance for token ${tokenId.slice(0, 10)}…: ${balance}`);
+      return balance;
+    }
+    console.warn(`[orders] balance-allowance returned ${res.status}: ${await res.text()}`);
+  } catch (e: any) {
+    console.warn("[orders] balance check failed:", e.message);
+  }
+  return 0;
+}
+
 export interface RecoveredPosition {
   orderId:         string;
   tokenId:         string;
@@ -86,6 +147,9 @@ export async function GET(req: NextRequest) {
     const walletAddress = req.nextUrl.searchParams.get("walletAddress");
     const l1Signature   = req.nextUrl.searchParams.get("l1Signature");
     const l1Timestamp   = req.nextUrl.searchParams.get("l1Timestamp");
+    // Token IDs for the market — passed by the client so we know which balances to check
+    const yesTokenId    = req.nextUrl.searchParams.get("yesTokenId") ?? "";
+    const noTokenId     = req.nextUrl.searchParams.get("noTokenId")  ?? "";
 
     if (!walletAddress || !l1Signature || !l1Timestamp) {
       return new Response("Missing required params: walletAddress, l1Signature, l1Timestamp", { status: 400 });
@@ -93,48 +157,37 @@ export async function GET(req: NextRequest) {
 
     const creds = await deriveApiCreds(walletAddress, l1Signature, Number(l1Timestamp));
 
-    const ts   = String(Math.floor(Date.now() / 1000));
-    const path = "/data/orders";
-    const hmac = await buildHmacSig(creds.secret, ts, "GET", path);
+    // ── 1. Fetch active orders from the CLOB ──────────────────────────────────
+    const ts       = String(Math.floor(Date.now() / 1000));
+    const ordPath  = "/data/orders";
+    const ordHmac  = await buildHmacSig(creds.secret, ts, "GET", ordPath);
 
-    const res = await fetch(`${POLYMARKET_API_HOST}${path}`, {
-      headers: {
-        POLY_ADDRESS:    walletAddress,
-        POLY_SIGNATURE:  hmac,
-        POLY_TIMESTAMP:  ts,
-        POLY_API_KEY:    creds.key,
-        POLY_PASSPHRASE: creds.passphrase,
-      },
+    const ordRes = await fetch(`${POLYMARKET_API_HOST}${ordPath}`, {
+      headers: makeAuthHeaders(walletAddress, ordHmac, ts, creds),
       signal: AbortSignal.timeout(12_000),
     });
 
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`[orders] CLOB error ${res.status}: ${text}`);
-      return new Response(`CLOB error (${res.status}): ${text}`, { status: res.status });
-    }
+    const enriched: RecoveredPosition[] = [];
 
-    const raw      = await res.json();
-    // CLOB returns either an array or { data: [...] }
-    const orders: Record<string, unknown>[] = Array.isArray(raw) ? raw : ((raw as any).data ?? []);
-    console.log(`[orders] fetched ${orders.length} total orders for ${walletAddress.slice(0, 10)}…`);
+    if (ordRes.ok) {
+      const raw      = await ordRes.json();
+      const orders: Record<string, unknown>[] = Array.isArray(raw) ? raw : ((raw as any).data ?? []);
+      console.log(`[orders] fetched ${orders.length} total orders for ${walletAddress.slice(0, 10)}…`);
 
-    // Keep only active BUY orders where the user has received tokens or is waiting for a fill
-    const activeBuys = orders.filter((o) => {
-      const side        = String(o.side ?? "").toUpperCase();
-      const status      = String(o.status ?? "").toUpperCase();
-      const sizeMatched = Number(o.size_matched ?? o.matched_size ?? 0);
-      return (
-        side === "BUY" &&
-        (status === "LIVE" || (status === "MATCHED" && sizeMatched > 0))
-      );
-    });
+      // Keep only active BUY orders where the user has received tokens or is waiting for a fill
+      const activeBuys = orders.filter((o) => {
+        const side        = String(o.side ?? "").toUpperCase();
+        const status      = String(o.status ?? "").toUpperCase();
+        const sizeMatched = Number(o.size_matched ?? o.matched_size ?? 0);
+        return (
+          side === "BUY" &&
+          (status === "LIVE" || (status === "MATCHED" && sizeMatched > 0))
+        );
+      });
 
-    console.log(`[orders] ${activeBuys.length} active BUY orders to recover`);
+      console.log(`[orders] ${activeBuys.length} active BUY orders`);
 
-    // Enrich with exchange address (parallel, but limit concurrency to avoid hammering CLOB)
-    const enriched: RecoveredPosition[] = await Promise.all(
-      activeBuys.map(async (o) => {
+      for (const o of activeBuys) {
         const tokenId      = String(o.asset_id ?? o.tokenId ?? "");
         const status       = String(o.status ?? "").toUpperCase();
         const sizeMatched  = Number(o.size_matched  ?? o.matched_size  ?? 0);
@@ -144,18 +197,49 @@ export async function GET(req: NextRequest) {
         const side: "YES" | "NO" = outcome === "no" ? "NO" : "YES";
         const exchangeAddress    = await getExchangeAddress(tokenId);
 
-        return {
-          orderId:  String(o.id ?? ""),
+        enriched.push({
+          orderId:         String(o.id ?? ""),
           tokenId,
           tokenCount,
           side,
           entryPrice:      Number(o.price ?? 0),
           status:          String(o.status ?? ""),
           exchangeAddress,
-        };
-      }),
-    );
+        });
+      }
+    } else {
+      console.warn(`[orders] CLOB orders endpoint returned ${ordRes.status}`);
+    }
 
+    // ── 2. Check conditional token balances directly (catches old/pruned orders) ─
+    // This is the primary recovery path: even if orders no longer appear in the
+    // CLOB order history, the tokens are still held in the user's proxy wallet.
+    const tokenChecks: { tokenId: string; side: "YES" | "NO" }[] = [];
+    if (yesTokenId) tokenChecks.push({ tokenId: yesTokenId, side: "YES" });
+    if (noTokenId)  tokenChecks.push({ tokenId: noTokenId,  side: "NO"  });
+
+    for (const { tokenId, side } of tokenChecks) {
+      if (!tokenId) continue;
+      // Skip if already covered by a live order entry
+      if (enriched.some((p) => p.tokenId === tokenId)) continue;
+
+      const balance = await getConditionalTokenBalance(walletAddress, creds, tokenId);
+      if (balance > 0) {
+        const exchangeAddress = await getExchangeAddress(tokenId);
+        enriched.push({
+          orderId:         `balance-${tokenId.slice(0, 16)}`,
+          tokenId,
+          tokenCount:      balance,
+          side,
+          entryPrice:      0,  // unknown — shown as N/A in UI
+          status:          "BALANCE",
+          exchangeAddress,
+        });
+        console.log(`[orders] recovered ${balance} ${side} tokens for ${walletAddress.slice(0, 10)}… via balance check`);
+      }
+    }
+
+    console.log(`[orders] returning ${enriched.length} recoverable positions`);
     return Response.json(enriched);
   } catch (err: any) {
     console.error("[orders] error:", err);

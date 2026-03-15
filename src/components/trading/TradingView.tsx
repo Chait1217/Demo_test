@@ -431,6 +431,10 @@ export function TradingView() {
         walletAddress: address,
         l1Signature:   sig,
         l1Timestamp:   String(ts),
+        // Pass market token IDs so the server can check on-chain balances directly
+        // (needed when old orders have been pruned from the CLOB order history)
+        yesTokenId:    market?.yesTokenId ?? "",
+        noTokenId:     market?.noTokenId  ?? "",
       });
       const res = await fetch(`/api/trade/orders?${params}`);
       if (!res.ok) throw new Error(await res.text());
@@ -537,7 +541,7 @@ export function TradingView() {
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
                   {[
-                    { label: "Entry",      value: `$${p.entryPrice.toFixed(4)}` },
+                    { label: "Entry",      value: p.entryPrice > 0 ? `$${p.entryPrice.toFixed(4)}` : "N/A" },
                     { label: "Collateral", value: `$${p.collateral.toFixed(2)}`  },
                     { label: "Borrowed",   value: `$${p.borrowed.toFixed(2)}`    },
                     { label: "Size",       value: `$${p.notional.toFixed(2)}`    },
