@@ -75,6 +75,7 @@ export function TradingView() {
   const [submitting, setSubmitting] = useState(false);
   const [submitStep, setSubmitStep] = useState<string>("");
   const [closing, setClosing]       = useState<string | null>(null);
+  const [syncing, setSyncing]       = useState(false);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
 
@@ -401,6 +402,82 @@ export function TradingView() {
     }
   }
 
+  async function syncPositions() {
+    if (!address || syncing) return;
+    setSyncing(true); setError(""); setSuccess("");
+    try {
+      // Sign L1 auth so the server can derive API creds
+      const ts  = Math.floor(Date.now() / 1000);
+      const sig = await signTypedDataAsync({
+        domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
+        types: {
+          ClobAuth: [
+            { name: "address",   type: "address" },
+            { name: "timestamp", type: "string"  },
+            { name: "nonce",     type: "uint256"  },
+            { name: "message",   type: "string"  },
+          ],
+        },
+        primaryType: "ClobAuth",
+        message: {
+          address:   address,
+          timestamp: String(ts),
+          nonce:     BigInt(0),
+          message:   "This message attests that I control the given wallet",
+        },
+      });
+
+      const params = new URLSearchParams({
+        walletAddress: address,
+        l1Signature:   sig,
+        l1Timestamp:   String(ts),
+      });
+      const res = await fetch(`/api/trade/orders?${params}`);
+      if (!res.ok) throw new Error(await res.text());
+
+      const recovered: {
+        orderId: string; tokenId: string; tokenCount: number;
+        side: "YES" | "NO"; entryPrice: number; exchangeAddress: string;
+      }[] = await res.json();
+
+      const existingIds = new Set((positions ?? []).map((p) => p.id));
+      let added = 0;
+      for (const r of recovered) {
+        if (!existingIds.has(r.orderId) && r.tokenCount > 0) {
+          addPosition({
+            id:              r.orderId,
+            walletAddress:   address,
+            side:            r.side,
+            entryPrice:      r.entryPrice,
+            collateral:      parseFloat((r.tokenCount * r.entryPrice).toFixed(6)),
+            borrowed:        0,
+            notional:        parseFloat((r.tokenCount * r.entryPrice).toFixed(6)),
+            leverage:        1,
+            fees:            { openFee: 0, closeFee: 0, liquidationFee: 0 },
+            state:           "OPEN",
+            openedAt:        new Date().toISOString(),
+            tokenId:         r.tokenId,
+            tokenCount:      r.tokenCount,
+            exchangeAddress: r.exchangeAddress,
+          });
+          added++;
+        }
+      }
+      refetchPositions();
+      if (added > 0) {
+        setSuccess(`Synced ${added} position${added > 1 ? "s" : ""} from Polymarket.`);
+      } else if (recovered.length === 0) {
+        setSuccess("No active positions found on Polymarket.");
+      } else {
+        setSuccess("All positions already up to date.");
+      }
+    } catch (e: any) {
+      setError(`Sync failed: ${e.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
@@ -408,8 +485,26 @@ export function TradingView() {
       <div className="card" style={{ padding: 20 }}>
         <div className="card-header">
           <div className="metric-label">Open Positions</div>
-          <div className={`pill ${openPositions.length > 0 ? "pill-live" : ""}`}>
-            {openPositions.length > 0 ? `${openPositions.length} Active` : "None"}
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {isConnected && (
+              <button
+                onClick={syncPositions}
+                disabled={syncing}
+                style={{
+                  fontFamily: "var(--mono)", fontSize: 11, fontWeight: 600,
+                  color: syncing ? "var(--text-3)" : "var(--accent)",
+                  background: "transparent", border: "1px solid",
+                  borderColor: syncing ? "var(--border)" : "rgba(0,229,160,0.3)",
+                  borderRadius: 6, padding: "4px 10px", cursor: syncing ? "default" : "pointer",
+                  transition: "border-color 150ms",
+                }}
+              >
+                {syncing ? "Syncing…" : "↻ Sync"}
+              </button>
+            )}
+            <div className={`pill ${openPositions.length > 0 ? "pill-live" : ""}`}>
+              {openPositions.length > 0 ? `${openPositions.length} Active` : "None"}
+            </div>
           </div>
         </div>
 
