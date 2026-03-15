@@ -1,18 +1,6 @@
 import { NextRequest } from "next/server";
-import { parseUnits } from "viem";
-import { ethers } from "ethers";
 import { recordClosePosition } from "@/server/positionsStore";
-import { VAULT_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
-import { leveragedVaultAbi } from "@/lib/vaultAbi";
-
-function getVaultWriteContract() {
-  const rpcUrl = process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com";
-  const pk     = process.env.POLYMARKET_PRIVATE_KEY;
-  if (!pk) throw new Error("POLYMARKET_PRIVATE_KEY not set");
-  const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
-  const signer   = new ethers.Wallet(pk, provider);
-  return new ethers.Contract(VAULT_ADDRESS, leveragedVaultAbi as any, signer);
-}
+import { POLYMARKET_API_HOST } from "@/lib/constants";
 
 // ── HMAC ─────────────────────────────────────────────────────────────────────
 
@@ -152,7 +140,6 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json() as {
       orderId:          string;
-      repayAmount:      number;
       walletAddress?:   string;
       l1Signature?:     string;
       l1Timestamp?:     number;
@@ -163,7 +150,7 @@ export async function POST(req: NextRequest) {
     };
 
     const {
-      orderId, repayAmount,
+      orderId,
       walletAddress, l1Signature, l1Timestamp, l1Nonce,
       sellOrderStruct, sellOrderSignature,
     } = body;
@@ -201,20 +188,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 2. Repay vault ────────────────────────────────────────────────────────
-    const ZERO     = "0x0000000000000000000000000000000000000000";
-    const hasVault = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO;
+    // vault.repay() is executed client-side (TradingView.tsx) from the user's
+    // own wallet after the SELL is posted, so the USDC goes back to the vault
+    // from the correct address with the correct on-chain balance.
 
-    if (hasVault && repayAmount > 0 && process.env.POLYMARKET_PRIVATE_KEY) {
-      try {
-        const vault = getVaultWriteContract();
-        await vault.repay(parseUnits(repayAmount.toFixed(6), 6));
-      } catch (e: any) {
-        console.warn("[close] vault repay non-fatal:", e.message);
-      }
-    }
-
-    // ── 3. Record closure ─────────────────────────────────────────────────────
+    // ── 2. Record closure ─────────────────────────────────────────────────────
     recordClosePosition(orderId);
 
     return Response.json({ ok: true, orderId });

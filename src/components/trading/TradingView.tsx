@@ -449,6 +449,45 @@ export function TradingView() {
         throw new Error(`Close failed (${closeRes.status}): ${errText}`);
       }
 
+      // ── Repay vault from user's wallet ────────────────────────────────────
+      // The SELL order was just posted; for a quickly-filled market-price order
+      // the USDC is already (or imminently) back in the wallet. Attempt repay
+      // now so the vault's accounting stays in sync. If the SELL hasn't settled
+      // yet this will fail gracefully and the user can repay later.
+      if (!isSimulated && VAULT_ADDRESS && VAULT_ADDRESS !== "0x0000000000000000000000000000000000000000" && borrowed > 0) {
+        try {
+          const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
+          // Approve vault to pull back the borrowed USDC
+          const repayAllowance = await publicClient!.readContract({
+            address:      USDCe_ADDRESS,
+            abi:          ERC20_APPROVE_ABI,
+            functionName: "allowance",
+            args:         [address as `0x${string}`, VAULT_ADDRESS as `0x${string}`],
+          }) as bigint;
+          if (repayAllowance < repayRaw) {
+            setSubmitStep("Approve vault to collect repayment… (wallet prompt)");
+            const approveTx = await writeContractAsync({
+              address:      USDCe_ADDRESS,
+              abi:          ERC20_APPROVE_ABI,
+              functionName: "approve",
+              args:         [VAULT_ADDRESS as `0x${string}`, repayRaw],
+            });
+            await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+          }
+          setSubmitStep("Repaying vault… (wallet prompt)");
+          const repayTx = await writeContractAsync({
+            address:      VAULT_ADDRESS as `0x${string}`,
+            abi:          leveragedVaultAbi,
+            functionName: "repay",
+            args:         [repayRaw],
+          });
+          await publicClient!.waitForTransactionReceipt({ hash: repayTx });
+        } catch (repayErr: any) {
+          // Non-fatal — SELL may not have filled yet; user retains the obligation
+          console.warn("[close] vault repay failed (non-fatal):", repayErr.message);
+        }
+      }
+
       // Only mark CLOSED locally after server confirms the SELL was posted
       closePositionLocal(positionId);
       setSuccess("Position closed — SELL order submitted to Polymarket.");
