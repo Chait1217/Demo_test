@@ -216,6 +216,23 @@ export async function POST(req: NextRequest) {
           chain:     POLYGON_CHAIN,
           transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
         });
+
+        const ERC20_APPROVE_ABI = [{
+          name: "approve", type: "function", stateMutability: "nonpayable",
+          inputs:  [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
+          outputs: [{ name: "", type: "bool" }],
+        }] as const;
+
+        // vault.repay() calls transferFrom(engine → vault), so the engine wallet
+        // must approve the vault to pull its USDC before calling repay().
+        const approveHash = await walletClient.writeContract({
+          address:      USDCe_ADDRESS,
+          abi:          ERC20_APPROVE_ABI,
+          functionName: "approve",
+          args:         [VAULT_ADDRESS, repayRaw],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveHash, timeout: 30_000 });
+
         const repayHash = await walletClient.writeContract({
           address:      VAULT_ADDRESS,
           abi:          leveragedVaultAbi,

@@ -413,6 +413,35 @@ export function TradingView() {
         }
       }
 
+      // ── Step: Send borrowed USDC to engine wallet BEFORE calling close route ──
+      // vault.repay() is onlyEngine and uses transferFrom(engine→vault).
+      // The engine must have USDC first. The user transfers it here (before the
+      // close route), so when the server calls vault.repay() it already holds it.
+      if (!isSimulated && borrowed > 0) {
+        try {
+          const engRes = await fetch("/api/engine-address");
+          const { address: engineAddress } = await engRes.json() as { address: string | null };
+          if (engineAddress) {
+            const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
+            setSubmitStep("Sending repayment to vault engine… (wallet prompt)");
+            const ERC20_TRANSFER_ABI = [{
+              name: "transfer", type: "function", stateMutability: "nonpayable",
+              inputs:  [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
+              outputs: [{ name: "", type: "bool" }],
+            }] as const;
+            const transferTx = await writeContractAsync({
+              address:      USDCe_ADDRESS,
+              abi:          ERC20_TRANSFER_ABI,
+              functionName: "transfer",
+              args:         [engineAddress as `0x${string}`, repayRaw],
+            });
+            await publicClient!.waitForTransactionReceipt({ hash: transferTx, timeout: 60_000 });
+          }
+        } catch (repayErr: any) {
+          console.warn("[close] repay transfer non-fatal:", repayErr.message);
+        }
+      }
+
       // Cancel (or SELL if filled) on Polymarket + repay vault — AWAIT so we only
       // mark the position closed after the server confirms success
       const closeRes = await fetch("/api/trade/close", {
@@ -433,38 +462,6 @@ export function TradingView() {
       if (!closeRes.ok) {
         const errText = await closeRes.text();
         throw new Error(`Close failed (${closeRes.status}): ${errText}`);
-      }
-
-      // ── Send borrowed USDC back to engine wallet so server can repay vault ──
-      // vault.repay() is onlyEngine — the server wallet must call it. The user
-      // first transfers the borrowed amount to the server's engine wallet, then
-      // the close route (already called above) handles vault.repay() server-side.
-      // This step only applies to filled positions (where the user sold tokens and
-      // received USDC back). For cancelled open orders the user already has collateral.
-      if (!isSimulated && borrowed > 0) {
-        try {
-          const engRes = await fetch("/api/engine-address");
-          const { address: engineAddress } = await engRes.json() as { address: string | null };
-          if (engineAddress) {
-            const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
-            setClosing(positionId); // keep spinner
-            const ERC20_TRANSFER_ABI = [{
-              name: "transfer", type: "function", stateMutability: "nonpayable",
-              inputs:  [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
-              outputs: [{ name: "", type: "bool" }],
-            }] as const;
-            const transferTx = await writeContractAsync({
-              address:      USDCe_ADDRESS,
-              abi:          ERC20_TRANSFER_ABI,
-              functionName: "transfer",
-              args:         [engineAddress as `0x${string}`, repayRaw],
-            });
-            await publicClient!.waitForTransactionReceipt({ hash: transferTx, timeout: 60_000 });
-          }
-        } catch (repayErr: any) {
-          // Non-fatal — position is closed on Polymarket regardless
-          console.warn("[close] repay transfer non-fatal:", repayErr.message);
-        }
       }
 
       // Only mark CLOSED locally after server confirms the SELL was posted
