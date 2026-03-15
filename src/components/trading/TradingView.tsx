@@ -156,7 +156,7 @@ export function TradingView() {
             args:         [spender, MAX_UINT256],
           });
           setSubmitStep("Waiting for approval confirmation…");
-          await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+          await publicClient!.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
         }
       }
 
@@ -175,7 +175,7 @@ export function TradingView() {
           args:         [borrowRaw],
         });
         setSubmitStep("Waiting for borrow confirmation…");
-        await publicClient!.waitForTransactionReceipt({ hash: borrowTx });
+        await publicClient!.waitForTransactionReceipt({ hash: borrowTx, timeout: 60_000 });
       }
 
       // ── Step 3: Sign the Polymarket L1 auth message (wallet popup #1) ─────
@@ -472,7 +472,7 @@ export function TradingView() {
               functionName: "approve",
               args:         [VAULT_ADDRESS as `0x${string}`, repayRaw],
             });
-            await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+            await publicClient!.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
           }
           setSubmitStep("Repaying vault… (wallet prompt)");
           const repayTx = await writeContractAsync({
@@ -481,7 +481,7 @@ export function TradingView() {
             functionName: "repay",
             args:         [repayRaw],
           });
-          await publicClient!.waitForTransactionReceipt({ hash: repayTx });
+          await publicClient!.waitForTransactionReceipt({ hash: repayTx, timeout: 60_000 });
         } catch (repayErr: any) {
           // Non-fatal — SELL may not have filled yet; user retains the obligation
           console.warn("[close] vault repay failed (non-fatal):", repayErr.message);
