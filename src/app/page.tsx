@@ -10,7 +10,7 @@ import { TransactionsView } from "@/components/transactions/TransactionsView";
 type Tab = "trade" | "vault" | "history";
 
 export default function HomePage() {
-  const { address, isConnected, isConnecting, connect, disconnect, connectError } = useWallet();
+  const { address, isConnected, isConnecting, connect, disconnect, connectError, isAlreadyPending } = useWallet();
   const { display: usdcDisplay } = useUsdcBalance();
   const [tab, setTab] = useState<Tab>("trade");
 
@@ -110,19 +110,25 @@ export default function HomePage() {
                   fontSize: 12,
                   fontWeight: 600,
                   color: isConnected ? "var(--text-2)" : "#000",
-                  cursor: isConnecting ? "not-allowed" : "pointer",
+                  cursor: (isConnecting && !isAlreadyPending) ? "not-allowed" : "pointer",
                   transition: "all 150ms",
                   minWidth: 140,
-                  opacity: isConnecting ? 0.6 : 1,
+                  opacity: (isConnecting && !isAlreadyPending) ? 0.6 : 1,
                 }}
                 onClick={() => isConnected ? disconnect() : connect()}
-                disabled={isConnecting}
+                disabled={isConnecting && !isAlreadyPending}
               >
-                {isConnecting ? "Connecting…" : isConnected ? short : "Connect Wallet"}
+                {isAlreadyPending
+                  ? "Retry Connect"
+                  : isConnecting ? "Connecting…"
+                  : isConnected ? short
+                  : "Connect Wallet"}
               </button>
               {connectError && (
                 <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "#ff6b6b" }}>
-                  {connectError.message.includes("provider")
+                  {isAlreadyPending
+                    ? "Open MetaMask and approve, or click Retry"
+                    : connectError.message.includes("provider")
                     ? "No wallet detected — install MetaMask"
                     : connectError.message.slice(0, 60)}
                 </span>
