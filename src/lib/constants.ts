@@ -7,6 +7,14 @@ export const POLYGON_CHAIN = polygon;
 export const USDCe_ADDRESS: Address =
   "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
+// Polymarket exchange contracts that need USDC.e allowance
+export const CTF_EXCHANGE_ADDRESS: Address      = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+export const NEG_RISK_EXCHANGE_ADDRESS: Address = "0xC5d563A36AE78145C45a50134d48A1215220f80a";
+
+// Polymarket ERC-1155 conditional token contract — SELL orders require
+// setApprovalForAll(exchangeAddress, true) on this contract.
+export const CTF_TOKEN_ADDRESS: Address = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+
 // Deployed LeveragedVault
 export const VAULT_ADDRESS: Address = (
   process.env.NEXT_PUBLIC_VAULT_ADDRESS ??

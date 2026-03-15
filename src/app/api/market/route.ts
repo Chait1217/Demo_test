@@ -44,7 +44,6 @@ const FALLBACK: MarketData = {
 let cachedMeta: Omit<MarketData, "yesPrice" | "noPrice" | "spread"> | null = null;
 let metaExpiry = 0;
 let cachedPrices = { yesPrice: 0.5, noPrice: 0.5, spread: 0 };
-let priceExpiry  = 0;
 
 type GammaMarket = Record<string, unknown>;
 
@@ -68,29 +67,42 @@ function parseOutcomePrices(m: GammaMarket): { yes: number; no: number } | null 
   return null;
 }
 
-/** Extract YES/NO token IDs from a Gamma market object */
+/** Extract YES/NO token IDs from a Gamma market object.
+ *  Handles both array and JSON-string forms of clobTokenIds / outcomes. */
 function parseTokenIds(m: GammaMarket): { yesTokenId: string; noTokenId: string } {
-  const tokens: { token_id: string; outcome: string }[] = Array.isArray(m.tokens)
-    ? (m.tokens as { token_id: string; outcome: string }[])
-    : [];
-  const clobIds: string[] = Array.isArray(m.clobTokenIds)
-    ? (m.clobTokenIds as string[])
-    : [];
+  // Form 1: tokens array with {token_id, outcome}
+  if (Array.isArray(m.tokens)) {
+    const tokens = m.tokens as { token_id: string; outcome: string }[];
+    const yes = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
+    const no  = tokens.find((t) => t.outcome?.toLowerCase() === "no");
+    if (yes?.token_id && no?.token_id)
+      return { yesTokenId: yes.token_id, noTokenId: no.token_id };
+  }
 
-  const yesToken = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
-  const noToken  = tokens.find((t) => t.outcome?.toLowerCase() === "no");
+  // Form 2: clobTokenIds (array or JSON string) + outcomes (array or JSON string)
+  let clobIds: string[] = [];
+  try {
+    const raw = m.clobTokenIds;
+    clobIds = Array.isArray(raw) ? (raw as string[]) : JSON.parse(raw as string);
+  } catch { /* ignore */ }
+
+  let outcomes: string[] = [];
+  try {
+    const raw = m.outcomes;
+    outcomes = Array.isArray(raw) ? (raw as string[]) : JSON.parse(raw as string);
+  } catch { /* ignore */ }
+
+  if (clobIds.length >= 2) {
+    const yesIdx = outcomes.findIndex((o) => o.toLowerCase() === "yes");
+    const noIdx  = outcomes.findIndex((o) => o.toLowerCase() === "no");
+    const yesId  = clobIds[yesIdx !== -1 ? yesIdx : 0];
+    const noId   = clobIds[noIdx  !== -1 ? noIdx  : 1];
+    if (yesId && noId) return { yesTokenId: yesId, noTokenId: noId };
+  }
 
   return {
-    yesTokenId:
-      yesToken?.token_id ||
-      clobIds[0] ||
-      process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES ||
-      "",
-    noTokenId:
-      noToken?.token_id ||
-      clobIds[1] ||
-      process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO ||
-      "",
+    yesTokenId: process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_YES ?? "",
+    noTokenId:  process.env.NEXT_PUBLIC_POLYMARKET_TOKEN_ID_NO  ?? "",
   };
 }
 
@@ -199,7 +211,7 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
     try {
       const hr = await fetch(
         `${CLOB}/prices-history?market=${yesTokenId}&interval=1w&fidelity=60`,
-        { signal: AbortSignal.timeout(8_000) }
+        { cache: "no-store", signal: AbortSignal.timeout(8_000) }
       );
       if (hr.ok) {
         const json = await hr.json();
@@ -225,50 +237,54 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
   };
   metaExpiry = now + 120_000;
 
-  // Seed prices immediately from Gamma outcomePrices (no CLOB round-trip needed)
-  if (market) {
+  // Seed cachedPrices from Gamma only as a last-resort fallback (no expiry override)
+  if (market && cachedPrices.yesPrice === 0.5) {
     const gp = parseOutcomePrices(market);
     if (gp) {
-      cachedPrices = {
-        yesPrice: parseFloat(gp.yes.toFixed(4)),
-        noPrice:  parseFloat(gp.no.toFixed(4)),
-        spread:   0,
-      };
-      priceExpiry = now + 30_000;
-      console.log(`[market] Gamma prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
+      cachedPrices = { yesPrice: parseFloat(gp.yes.toFixed(4)), noPrice: parseFloat(gp.no.toFixed(4)), spread: 0 };
+      console.log(`[market] Gamma seed prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
     }
   }
 
   return cachedMeta;
 }
 
-// Fetch live bid/ask from CLOB — cached 8 seconds
+// Fetch live bid/ask from CLOB — no server-side caching so every client poll gets fresh data
 async function fetchLivePrices(yesTokenId: string) {
   if (!yesTokenId) return cachedPrices;
-  const now = Date.now();
-  if (now < priceExpiry) return cachedPrices;
 
   try {
     const [sellRes, buyRes] = await Promise.all([
-      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=sell`, { signal: AbortSignal.timeout(5_000) }),
-      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=buy`,  { signal: AbortSignal.timeout(5_000) }),
+      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=SELL`, { cache: "no-store", signal: AbortSignal.timeout(5_000) }),
+      fetch(`${CLOB}/price?token_id=${yesTokenId}&side=BUY`,  { cache: "no-store", signal: AbortSignal.timeout(5_000) }),
     ]);
 
-    if (sellRes.ok && buyRes.ok) {
-      const bid = parseFloat((await sellRes.json()).price ?? "0");
-      const ask = parseFloat((await buyRes.json()).price  ?? "0");
-      if (bid > 0 && ask > 0 && bid <= ask && ask <= 1) {
-        const mid = (bid + ask) / 2;
-        cachedPrices = {
-          yesPrice: parseFloat(mid.toFixed(4)),
-          noPrice:  parseFloat((1 - mid).toFixed(4)),
-          spread:   parseFloat((ask - bid).toFixed(4)),
-        };
-        priceExpiry = now + 8_000;
-        console.log(`[market] Live CLOB prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
-      }
+    if (!sellRes.ok || !buyRes.ok) {
+      console.warn(`[market] CLOB price HTTP error — sell:${sellRes.status} buy:${buyRes.status}`);
+      return cachedPrices;
     }
-  } catch { /* keep cached */ }
+
+    const sellData = await sellRes.json();
+    const buyData  = await buyRes.json();
+    console.log(`[market] CLOB raw — sell:${JSON.stringify(sellData)} buy:${JSON.stringify(buyData)}`);
+
+    const bid = parseFloat(String(sellData.price ?? sellData.price ?? "0"));
+    const ask = parseFloat(String(buyData.price  ?? buyData.price  ?? "0"));
+
+    if (bid > 0 && ask > 0 && bid <= ask + 0.01 && ask <= 1.01) {
+      const mid = (bid + ask) / 2;
+      cachedPrices = {
+        yesPrice: parseFloat(Math.min(mid, 1).toFixed(4)),
+        noPrice:  parseFloat(Math.max(1 - mid, 0).toFixed(4)),
+        spread:   parseFloat(Math.abs(ask - bid).toFixed(4)),
+      };
+      console.log(`[market] Live CLOB prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
+    } else {
+      console.warn(`[market] CLOB prices rejected — bid:${bid} ask:${ask}`);
+    }
+  } catch (e) {
+    console.warn(`[market] CLOB fetch error — ${e}`);
+  }
 
   return cachedPrices;
 }
@@ -277,7 +293,18 @@ export async function GET() {
   try {
     const meta   = await fetchMeta();
     const prices = await fetchLivePrices(meta.yesTokenId);
-    const data: MarketData = { ...meta, ...prices };
+
+    // Always append the current live price as the final history point so the
+    // chart end-point reflects real-time CLOB data, not stale cached history.
+    const nowSec     = Math.floor(Date.now() / 1000);
+    const livePoint  = { t: nowSec, p: prices.yesPrice };
+    const history    = meta.priceHistory ?? [];
+    const lastT      = history.length > 0 ? history[history.length - 1].t : 0;
+    const priceHistory = lastT === nowSec
+      ? [...history.slice(0, -1), livePoint]   // replace same-second bucket
+      : [...history, livePoint];               // append new point
+
+    const data: MarketData = { ...meta, priceHistory, ...prices };
     return Response.json(data, { headers: { "Cache-Control": "no-store" } });
   } catch (err: unknown) {
     console.error("[/api/market]", err);

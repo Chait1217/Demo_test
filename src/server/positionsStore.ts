@@ -21,6 +21,10 @@ export interface Position {
   openedAt: string;
   closedAt?: string;
   txHash?: string;
+  // Fields needed to close a filled position (SELL the outcome tokens back)
+  tokenId?: string;
+  tokenCount?: number;      // actual tokens received (takerAmount / 1e6)
+  exchangeAddress?: string; // CTF or NegRisk exchange used when opening
 }
 
 const positions: Position[] = [];

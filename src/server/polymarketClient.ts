@@ -10,6 +10,49 @@ import {
 let fullClient: ClobClient | null = null;
 let cachedTokenIds: { yes: string; no: string } | null = null;
 
+/** Parse YES/NO token IDs from a Gamma market object.
+ *  Handles both array and JSON-string forms of clobTokenIds / tokens. */
+function extractTokenIds(
+  market: Record<string, unknown>
+): { yes: string; no: string } | null {
+  // Form 1: tokens array with {token_id, outcome} objects
+  const tokensRaw = market.tokens;
+  if (Array.isArray(tokensRaw)) {
+    const yes = (tokensRaw as { token_id: string; outcome: string }[]).find(
+      (t) => t.outcome?.toLowerCase() === "yes"
+    );
+    const no = (tokensRaw as { token_id: string; outcome: string }[]).find(
+      (t) => t.outcome?.toLowerCase() === "no"
+    );
+    if (yes?.token_id && no?.token_id)
+      return { yes: yes.token_id, no: no.token_id };
+  }
+
+  // Form 2: clobTokenIds (array or JSON string) + outcomes (array or JSON string)
+  let clobIds: string[] = [];
+  try {
+    const raw = market.clobTokenIds;
+    clobIds = Array.isArray(raw) ? (raw as string[]) : JSON.parse(raw as string);
+  } catch { /* ignore */ }
+
+  let outcomes: string[] = [];
+  try {
+    const raw = market.outcomes;
+    outcomes = Array.isArray(raw) ? (raw as string[]) : JSON.parse(raw as string);
+  } catch { /* ignore */ }
+
+  if (clobIds.length >= 2) {
+    // Match by outcomes array when available, otherwise assume [yes, no] order
+    const yesIdx = outcomes.findIndex((o) => o.toLowerCase() === "yes");
+    const noIdx  = outcomes.findIndex((o) => o.toLowerCase() === "no");
+    const yes = clobIds[yesIdx !== -1 ? yesIdx : 0];
+    const no  = clobIds[noIdx  !== -1 ? noIdx  : 1];
+    if (yes && no) return { yes, no };
+  }
+
+  return null;
+}
+
 export async function getTokenIds(): Promise<{ yes: string; no: string }> {
   if (cachedTokenIds) return cachedTokenIds;
 
@@ -20,23 +63,40 @@ export async function getTokenIds(): Promise<{ yes: string; no: string }> {
     return cachedTokenIds;
   }
 
-  const res = await fetch(
-    `${POLYMARKET_GAMMA_HOST}/markets?slug=${IRAN_MARKET_SLUG}`,
-    { signal: AbortSignal.timeout(8_000) }
-  );
-  if (!res.ok) throw new Error("Failed to fetch market token IDs");
+  // Strategy 1: events endpoint (returns nested markets with full token data)
+  try {
+    const res = await fetch(
+      `${POLYMARKET_GAMMA_HOST}/events?slug=${IRAN_MARKET_SLUG}`,
+      { signal: AbortSignal.timeout(8_000) }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const event = Array.isArray(data) ? data[0] : data;
+      const markets: Record<string, unknown>[] = (event?.markets as Record<string, unknown>[]) ?? [];
+      for (const m of markets) {
+        const ids = extractTokenIds(m);
+        if (ids) { cachedTokenIds = ids; return ids; }
+      }
+    }
+  } catch { /* fall through */ }
 
-  const data = await res.json();
-  const market = Array.isArray(data) ? data[0] : data;
-  const tokens: { token_id: string; outcome: string }[] = market?.tokens ?? [];
-  const yesToken = tokens.find((t) => t.outcome?.toLowerCase() === "yes");
-  const noToken  = tokens.find((t) => t.outcome?.toLowerCase() === "no");
+  // Strategy 2: direct markets slug lookup
+  try {
+    const res = await fetch(
+      `${POLYMARKET_GAMMA_HOST}/markets?slug=${IRAN_MARKET_SLUG}`,
+      { signal: AbortSignal.timeout(8_000) }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      const market = Array.isArray(data) ? data[0] : data;
+      if (market) {
+        const ids = extractTokenIds(market as Record<string, unknown>);
+        if (ids) { cachedTokenIds = ids; return ids; }
+      }
+    }
+  } catch { /* fall through */ }
 
-  if (!yesToken || !noToken)
-    throw new Error("Could not find YES/NO token IDs for Iran market");
-
-  cachedTokenIds = { yes: yesToken.token_id, no: noToken.token_id };
-  return cachedTokenIds;
+  throw new Error("Could not find YES/NO token IDs for Iran market");
 }
 
 async function getFullClient(): Promise<ClobClient> {

@@ -1,13 +1,26 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount, useChainId, useSwitchChain, useSignTypedData } from "wagmi";
+import { useAccount, useChainId, useSwitchChain, useSignTypedData, usePublicClient, useWriteContract } from "wagmi";
 import { polygon } from "wagmi/chains";
 import { useMarket } from "@/hooks/useMarket";
 import { useUsdcBalance } from "@/hooks/useUsdcBalance";
 import { useVault } from "@/hooks/useVault";
-import { usePositions, addPosition, closePositionLocal } from "@/hooks/usePositions";
+import { usePositions, addPosition, updatePosition, closePositionLocal } from "@/hooks/usePositions";
 import { computePositionPreview } from "@/lib/leverage";
+import { USDCe_ADDRESS, CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS, CTF_TOKEN_ADDRESS, VAULT_ADDRESS } from "@/lib/constants";
+import { leveragedVaultAbi } from "@/lib/vaultAbi";
+
+const ERC20_APPROVE_ABI = [
+  { name: "allowance", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }], outputs: [{ name: "", type: "uint256" }] },
+  { name: "approve",   type: "function", stateMutability: "nonpayable", inputs: [{ name: "spender", type: "address" }, { name: "amount",  type: "uint256" }], outputs: [{ name: "", type: "bool"    }] },
+] as const;
+
+const ERC1155_APPROVAL_ABI = [
+  { name: "isApprovedForAll", type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "operator", type: "address" }], outputs: [{ name: "", type: "bool" }] },
+  { name: "setApprovalForAll", type: "function", stateMutability: "nonpayable", inputs: [{ name: "operator", type: "address" }, { name: "approved", type: "bool" }], outputs: [] },
+  { name: "balanceOf",         type: "function", stateMutability: "view",      inputs: [{ name: "owner", type: "address" }, { name: "id", type: "uint256" }],         outputs: [{ name: "", type: "uint256" }] },
+] as const;
 
 type Side = "YES" | "NO";
 
@@ -59,7 +72,9 @@ export function TradingView() {
   const { snapshot, isDeployed: vaultDeployed } = useVault();
   const { data: positions, refetch: refetchPositions } = usePositions();
 
-  const { signTypedDataAsync } = useSignTypedData();
+  const { signTypedDataAsync }          = useSignTypedData();
+  const publicClient                    = usePublicClient();
+  const { writeContractAsync }          = useWriteContract();
 
   const [side, setSide]             = useState<Side | null>(null);
   const [collateral, setCollateral] = useState("");
@@ -67,6 +82,7 @@ export function TradingView() {
   const [submitting, setSubmitting] = useState(false);
   const [submitStep, setSubmitStep] = useState<string>("");
   const [closing, setClosing]       = useState<string | null>(null);
+  const [syncing, setSyncing]       = useState(false);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
 
@@ -94,12 +110,75 @@ export function TradingView() {
       const prepRes = await fetch("/api/trade/prepare", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ walletAddress: address, side, collateral: numCollateral, leverage, price: entryPrice }),
+        body: JSON.stringify({
+          walletAddress: address,
+          side,
+          collateral: numCollateral,
+          leverage,
+          price: entryPrice,
+          yesTokenId: market?.yesTokenId ?? "",
+          noTokenId:  market?.noTokenId  ?? "",
+        }),
       });
       if (!prepRes.ok) throw new Error(await prepRes.text() || `Prepare error ${prepRes.status}`);
       const { orderStruct, exchangeAddress, l1Timestamp, l1Nonce } = await prepRes.json();
 
-      // ── Step 2: Sign the Polymarket L1 auth message (wallet popup #1) ─────
+      // ── Step 1b: Hard balance check — user only needs to cover their collateral;
+      // the vault will provide the borrowed portion in Step 2b below.
+      if (rawBalance < numCollateral) {
+        throw new Error(
+          `Insufficient USDC.e balance — need $${numCollateral.toFixed(2)}, wallet has $${rawBalance.toFixed(2)}`
+        );
+      }
+
+      // ── Step 2: Ensure USDC.e allowance for both Polymarket exchange contracts ──
+      // We approve both the standard CTF exchange and the neg-risk exchange because
+      // the CLOB checks whichever one governs the token, and the neg-risk API lookup
+      // can fail causing us to use the wrong address otherwise.
+      setSubmitStep("Checking USDC.e allowance…");
+      const needed = BigInt(orderStruct.makerAmount as string);
+      const MAX_UINT256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+      for (const spender of [CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS]) {
+        const currentAllowance = await publicClient!.readContract({
+          address:      USDCe_ADDRESS,
+          abi:          ERC20_APPROVE_ABI,
+          functionName: "allowance",
+          args:         [address, spender],
+        }) as bigint;
+
+        if (currentAllowance < needed) {
+          setSubmitStep(`Approve USDC.e spend… (wallet prompt)`);
+          const approveTx = await writeContractAsync({
+            address:      USDCe_ADDRESS,
+            abi:          ERC20_APPROVE_ABI,
+            functionName: "approve",
+            args:         [spender, MAX_UINT256],
+          });
+          setSubmitStep("Waiting for approval confirmation…");
+          await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+        }
+      }
+
+      // ── Step 2b: Borrow leveraged portion from vault ─────────────────────
+      // The vault sends borrowed USDC directly to the user's wallet so the
+      // full notional is available when Polymarket fills the BUY order.
+      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+      const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
+      if (hasVault && preview.borrowed > 0) {
+        setSubmitStep("Borrowing from vault… (wallet prompt)");
+        const borrowRaw = BigInt(Math.round(preview.borrowed * 1_000_000));
+        const borrowTx  = await writeContractAsync({
+          address:      VAULT_ADDRESS as `0x${string}`,
+          abi:          leveragedVaultAbi,
+          functionName: "borrow",
+          args:         [borrowRaw],
+        });
+        setSubmitStep("Waiting for borrow confirmation…");
+        await publicClient!.waitForTransactionReceipt({ hash: borrowTx });
+      }
+
+      // ── Step 3: Sign the Polymarket L1 auth message (wallet popup #1) ─────
       setSubmitStep("Sign to authenticate with Polymarket… (1/2)");
       const l1Signature = await signTypedDataAsync({
         domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
@@ -120,7 +199,7 @@ export function TradingView() {
         },
       });
 
-      // ── Step 3: Sign the order itself (wallet popup #2) ───────────────────
+      // ── Step 4: Sign the order itself (wallet popup #2) ───────────────────
       setSubmitStep("Sign to authorise this trade… (2/2)");
       const orderSignature = await signTypedDataAsync({
         domain: {
@@ -162,7 +241,7 @@ export function TradingView() {
         },
       });
 
-      // ── Step 4: Submit to CLOB via server (derives API creds + posts order) ─
+      // ── Step 5: Submit to CLOB via server (derives API creds + posts order) ─
       setSubmitStep("Submitting to Polymarket…");
       const subRes = await fetch("/api/trade/submit", {
         method: "POST",
@@ -184,7 +263,7 @@ export function TradingView() {
       const json = await subRes.json();
       const orderId = json.orderId;
 
-      // ── Step 5: Persist locally ────────────────────────────────────────────
+      // ── Step 6: Persist locally ────────────────────────────────────────────
       addPosition({
         id: orderId,
         walletAddress: address,
@@ -201,6 +280,10 @@ export function TradingView() {
         },
         state:    "OPEN",
         openedAt: new Date().toISOString(),
+        // Store fields needed to SELL tokens back when closing a filled position
+        tokenId:         orderStruct.tokenId as string,
+        tokenCount:      Number(BigInt(orderStruct.takerAmount as string)) / 1e6,
+        exchangeAddress,
       });
       refetchPositions();
 
@@ -217,13 +300,16 @@ export function TradingView() {
   async function closePosition(positionId: string, borrowed: number) {
     setClosing(positionId); setError(""); setSuccess("");
     try {
-      // For real orders: sign L1 auth so the server can cancel on Polymarket
       const isSimulated = positionId.startsWith("sim_") || positionId.startsWith("placed_");
       let l1Signature: string | undefined;
       let l1Timestamp: number | undefined;
+      let sellOrderStruct: Record<string, unknown> | undefined;
+      let sellOrderSignature: string | undefined;
 
       if (!isSimulated && address) {
         l1Timestamp = Math.floor(Date.now() / 1000);
+
+        // ── Sign L1 auth (wallet popup #1) ──────────────────────────────────
         l1Signature = await signTypedDataAsync({
           domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
           types: {
@@ -242,26 +328,169 @@ export function TradingView() {
             message:   "This message attests that I control the given wallet",
           },
         });
+
+        // ── Build + sign SELL order for filled-position recovery ─────────────
+        // Look up stored position data (tokenId, tokenCount, exchangeAddress)
+        const pos = (positions ?? []).find((p) => p.id === positionId);
+        if (pos?.tokenId && pos.tokenCount && pos.exchangeAddress) {
+          // ERC-1155 SELL orders require the exchange to be approved as an operator.
+          setSubmitStep("Checking ERC-1155 token approval…");
+          const isApproved = await publicClient!.readContract({
+            address:      CTF_TOKEN_ADDRESS,
+            abi:          ERC1155_APPROVAL_ABI,
+            functionName: "isApprovedForAll",
+            args:         [address as `0x${string}`, pos.exchangeAddress as `0x${string}`],
+          });
+          if (!isApproved) {
+            setSubmitStep("Approving exchange to transfer tokens (wallet popup)…");
+            const approveTx = await writeContractAsync({
+              address:      CTF_TOKEN_ADDRESS,
+              abi:          ERC1155_APPROVAL_ABI,
+              functionName: "setApprovalForAll",
+              args:         [pos.exchangeAddress as `0x${string}`, true],
+            });
+            await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+          }
+          const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+          const currentPrice = pos.side === "YES" ? yesPrice : noPrice;
+          // Round to 0.01 tick size — same rule the CLOB enforces on price = takerAmount/makerAmount
+          const tickPrice = Math.round(currentPrice * 100) / 100 || 0.01;
+
+          // Read the exact on-chain balance so we never try to sell more than we hold.
+          // makerAmount must be a multiple of 10_000 (max 2 dp in token units) → floor, not round.
+          // takerAmount must be a multiple of 100   (max 4 dp in USDC  units) → derived from floored maker.
+          const onChainBalance = await publicClient!.readContract({
+            address:      CTF_TOKEN_ADDRESS,
+            abi:          ERC1155_APPROVAL_ABI,
+            functionName: "balanceOf",
+            args:         [address as `0x${string}`, BigInt(pos.tokenId)],
+          }) as bigint;
+          const makerAmountRaw = (BigInt(Math.floor(Number(onChainBalance) / 10_000)) * 10_000n).toString();
+          const takerAmountRaw = (Math.floor((Number(makerAmountRaw) / 1_000_000) * tickPrice * 1_000_000 / 100) * 100).toString();
+          const sellSalt       = Math.round(Math.random() * Date.now()).toString();
+
+          sellOrderStruct = {
+            salt:          sellSalt,
+            maker:         address,
+            signer:        address,
+            taker:         ZERO_ADDRESS,
+            tokenId:       pos.tokenId,
+            makerAmount:   makerAmountRaw,
+            takerAmount:   takerAmountRaw,
+            expiration:    "0",
+            nonce:         "0",
+            feeRateBps:    "0",
+            side:          1,   // SELL
+            signatureType: 0,   // EOA
+          };
+
+          // ── Sign the SELL order (wallet popup #2) ────────────────────────
+          sellOrderSignature = await signTypedDataAsync({
+            domain: {
+              name:              "Polymarket CTF Exchange",
+              version:           "1",
+              chainId:           polygon.id,
+              verifyingContract: pos.exchangeAddress as `0x${string}`,
+            },
+            types: {
+              Order: [
+                { name: "salt",          type: "uint256" },
+                { name: "maker",         type: "address" },
+                { name: "signer",        type: "address" },
+                { name: "taker",         type: "address" },
+                { name: "tokenId",       type: "uint256" },
+                { name: "makerAmount",   type: "uint256" },
+                { name: "takerAmount",   type: "uint256" },
+                { name: "expiration",    type: "uint256" },
+                { name: "nonce",         type: "uint256" },
+                { name: "feeRateBps",    type: "uint256" },
+                { name: "side",          type: "uint8"   },
+                { name: "signatureType", type: "uint8"   },
+              ],
+            },
+            primaryType: "Order",
+            message: {
+              salt:          BigInt(sellOrderStruct.salt as string),
+              maker:         sellOrderStruct.maker  as `0x${string}`,
+              signer:        sellOrderStruct.signer as `0x${string}`,
+              taker:         sellOrderStruct.taker  as `0x${string}`,
+              tokenId:       BigInt(sellOrderStruct.tokenId  as string),
+              makerAmount:   BigInt(sellOrderStruct.makerAmount as string),
+              takerAmount:   BigInt(sellOrderStruct.takerAmount as string),
+              expiration:    BigInt(sellOrderStruct.expiration  as string),
+              nonce:         BigInt(sellOrderStruct.nonce       as string),
+              feeRateBps:    BigInt(sellOrderStruct.feeRateBps  as string),
+              side:          sellOrderStruct.side          as number,
+              signatureType: sellOrderStruct.signatureType as number,
+            },
+          });
+        }
       }
 
-      // Immediately update localStorage — UI reflects change instantly
-      closePositionLocal(positionId);
-
-      // Fire-and-forget: cancel on Polymarket + repay vault
-      fetch("/api/trade/close", {
+      // Cancel (or SELL if filled) on Polymarket + repay vault — AWAIT so we only
+      // mark the position closed after the server confirms success
+      const closeRes = await fetch("/api/trade/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          orderId:      positionId,
-          repayAmount:  borrowed,
-          walletAddress: address,
+          orderId:           positionId,
+          repayAmount:       borrowed,
+          walletAddress:     address,
           l1Signature,
           l1Timestamp,
-          l1Nonce: 0,
+          l1Nonce:           0,
+          sellOrderStruct,
+          sellOrderSignature,
         }),
-      }).catch(() => { /* ignore network errors — position already closed locally */ });
+      });
 
-      setSuccess("Position closed successfully.");
+      if (!closeRes.ok) {
+        const errText = await closeRes.text();
+        throw new Error(`Close failed (${closeRes.status}): ${errText}`);
+      }
+
+      // ── Repay vault from user's wallet ────────────────────────────────────
+      // The SELL order was just posted; for a quickly-filled market-price order
+      // the USDC is already (or imminently) back in the wallet. Attempt repay
+      // now so the vault's accounting stays in sync. If the SELL hasn't settled
+      // yet this will fail gracefully and the user can repay later.
+      if (!isSimulated && VAULT_ADDRESS && VAULT_ADDRESS !== "0x0000000000000000000000000000000000000000" && borrowed > 0) {
+        try {
+          const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
+          // Approve vault to pull back the borrowed USDC
+          const repayAllowance = await publicClient!.readContract({
+            address:      USDCe_ADDRESS,
+            abi:          ERC20_APPROVE_ABI,
+            functionName: "allowance",
+            args:         [address as `0x${string}`, VAULT_ADDRESS as `0x${string}`],
+          }) as bigint;
+          if (repayAllowance < repayRaw) {
+            setSubmitStep("Approve vault to collect repayment… (wallet prompt)");
+            const approveTx = await writeContractAsync({
+              address:      USDCe_ADDRESS,
+              abi:          ERC20_APPROVE_ABI,
+              functionName: "approve",
+              args:         [VAULT_ADDRESS as `0x${string}`, repayRaw],
+            });
+            await publicClient!.waitForTransactionReceipt({ hash: approveTx });
+          }
+          setSubmitStep("Repaying vault… (wallet prompt)");
+          const repayTx = await writeContractAsync({
+            address:      VAULT_ADDRESS as `0x${string}`,
+            abi:          leveragedVaultAbi,
+            functionName: "repay",
+            args:         [repayRaw],
+          });
+          await publicClient!.waitForTransactionReceipt({ hash: repayTx });
+        } catch (repayErr: any) {
+          // Non-fatal — SELL may not have filled yet; user retains the obligation
+          console.warn("[close] vault repay failed (non-fatal):", repayErr.message);
+        }
+      }
+
+      // Only mark CLOSED locally after server confirms the SELL was posted
+      closePositionLocal(positionId);
+      setSuccess("Position closed — SELL order submitted to Polymarket.");
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -269,8 +498,180 @@ export function TradingView() {
     }
   }
 
+  async function syncPositions() {
+    if (!address || syncing) return;
+    setSyncing(true); setError(""); setSuccess("");
+    try {
+      // Sign L1 auth so the server can derive API creds
+      const ts  = Math.floor(Date.now() / 1000);
+      const sig = await signTypedDataAsync({
+        domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
+        types: {
+          ClobAuth: [
+            { name: "address",   type: "address" },
+            { name: "timestamp", type: "string"  },
+            { name: "nonce",     type: "uint256"  },
+            { name: "message",   type: "string"  },
+          ],
+        },
+        primaryType: "ClobAuth",
+        message: {
+          address:   address,
+          timestamp: String(ts),
+          nonce:     BigInt(0),
+          message:   "This message attests that I control the given wallet",
+        },
+      });
+
+      const params = new URLSearchParams({
+        walletAddress: address,
+        l1Signature:   sig,
+        l1Timestamp:   String(ts),
+        // Pass market token IDs so the server can check on-chain balances directly
+        // (needed when old orders have been pruned from the CLOB order history)
+        yesTokenId:    market?.yesTokenId ?? "",
+        noTokenId:     market?.noTokenId  ?? "",
+      });
+      const res = await fetch(`/api/trade/orders?${params}`);
+      if (!res.ok) throw new Error(await res.text());
+
+      const recovered: {
+        orderId: string; tokenId: string; tokenCount: number;
+        side: "YES" | "NO"; entryPrice: number; exchangeAddress: string;
+      }[] = await res.json();
+
+      const existingIds = new Set((positions ?? []).map((p) => p.id));
+      let added = 0;
+      for (const r of recovered) {
+        if (r.tokenCount <= 0) continue;
+        if (existingIds.has(r.orderId)) {
+          // Always overwrite balance-derived positions so a stale tokenCount gets corrected
+          if (r.orderId.startsWith("balance-")) {
+            updatePosition(r.orderId, {
+              tokenCount:      r.tokenCount,
+              tokenId:         r.tokenId,
+              exchangeAddress: r.exchangeAddress,
+            });
+          }
+          continue;
+        }
+        addPosition({
+          id:              r.orderId,
+          walletAddress:   address,
+          side:            r.side,
+          entryPrice:      r.entryPrice,
+          collateral:      parseFloat((r.tokenCount * r.entryPrice).toFixed(6)),
+          borrowed:        0,
+          notional:        parseFloat((r.tokenCount * r.entryPrice).toFixed(6)),
+          leverage:        1,
+          fees:            { openFee: 0, closeFee: 0, liquidationFee: 0 },
+          state:           "OPEN",
+          openedAt:        new Date().toISOString(),
+          tokenId:         r.tokenId,
+          tokenCount:      r.tokenCount,
+          exchangeAddress: r.exchangeAddress,
+        });
+        added++;
+      }
+      refetchPositions();
+      if (added > 0) {
+        setSuccess(`Synced ${added} position${added > 1 ? "s" : ""} from Polymarket.`);
+      } else if (recovered.length === 0) {
+        setSuccess("No active positions found on Polymarket.");
+      } else {
+        setSuccess("All positions already up to date.");
+      }
+    } catch (e: any) {
+      setError(`Sync failed: ${e.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+      {/* ── Open Positions ─────────────────────────────────── */}
+      <div className="card" style={{ padding: 20 }}>
+        <div className="card-header">
+          <div className="metric-label">Open Positions</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            {isConnected && (
+              <button
+                onClick={syncPositions}
+                disabled={syncing}
+                style={{
+                  fontFamily: "var(--mono)", fontSize: 11, fontWeight: 600,
+                  color: syncing ? "var(--text-3)" : "var(--accent)",
+                  background: "transparent", border: "1px solid",
+                  borderColor: syncing ? "var(--border)" : "rgba(0,229,160,0.3)",
+                  borderRadius: 6, padding: "4px 10px", cursor: syncing ? "default" : "pointer",
+                  transition: "border-color 150ms",
+                }}
+              >
+                {syncing ? "Syncing…" : "↻ Sync"}
+              </button>
+            )}
+            <div className={`pill ${openPositions.length > 0 ? "pill-live" : ""}`}>
+              {openPositions.length > 0 ? `${openPositions.length} Active` : "None"}
+            </div>
+          </div>
+        </div>
+
+        {!isConnected ? (
+          <div style={{ textAlign: "center", padding: "32px 20px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>Connect wallet to see your open positions</div>
+          </div>
+        ) : openPositions.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "32px 20px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>No open positions — open one below</div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {openPositions.map((p) => (
+              <div key={p.id} style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span className={`tag tag-${p.side.toLowerCase()}`}>{p.side}</span>
+                    <span className="tag tag-open">OPEN</span>
+                    <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)" }}>{p.leverage.toFixed(1)}x leverage</span>
+                  </div>
+                  <button
+                    className="btn-danger"
+                    style={{ padding: "7px 16px", fontSize: 12 }}
+                    disabled={closing === p.id}
+                    onClick={() => closePosition(p.id, p.borrowed)}
+                  >
+                    {closing === p.id ? "Closing…" : "✕ Close Position"}
+                  </button>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+                  {[
+                    { label: "Entry",      value: p.entryPrice > 0 ? `$${p.entryPrice.toFixed(4)}` : "N/A" },
+                    { label: "Collateral", value: `$${p.collateral.toFixed(2)}`  },
+                    { label: "Borrowed",   value: `$${p.borrowed.toFixed(2)}`    },
+                    { label: "Size",       value: `$${p.notional.toFixed(2)}`    },
+                  ].map(({ label, value }) => (
+                    <div key={label}>
+                      <div className="metric-label" style={{ marginBottom: 3 }}>{label}</div>
+                      <div className="metric-value-sm">{value}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>
+                    Opened {new Date(p.openedAt).toLocaleString()}
+                  </span>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>·</span>
+                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>
+                    ID: {p.id}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* ── Market Header ─────────────────────────────────── */}
       <div className="card" style={{ padding: 20 }}>
@@ -450,69 +851,6 @@ export function TradingView() {
         )}
       </div>
 
-      {/* ── Open Positions ─────────────────────────────────── */}
-      <div className="card" style={{ padding: 20 }}>
-        <div className="card-header">
-          <div className="metric-label">Open Positions</div>
-          <div className={`pill ${openPositions.length > 0 ? "pill-live" : ""}`}>
-            {openPositions.length > 0 ? `${openPositions.length} Active` : "None"}
-          </div>
-        </div>
-
-        {!isConnected ? (
-          <div style={{ textAlign: "center", padding: "32px 20px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>Connect wallet to see your open positions</div>
-          </div>
-        ) : openPositions.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "32px 20px", background: "var(--surface-2)", borderRadius: 12, border: "1px solid var(--border)" }}>
-            <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)" }}>No open positions — open one above</div>
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {openPositions.map((p) => (
-              <div key={p.id} style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <span className={`tag tag-${p.side.toLowerCase()}`}>{p.side}</span>
-                    <span className="tag tag-open">OPEN</span>
-                    <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)" }}>{p.leverage.toFixed(1)}x leverage</span>
-                  </div>
-                  <button
-                    className="btn-danger"
-                    style={{ padding: "7px 16px", fontSize: 12 }}
-                    disabled={closing === p.id}
-                    onClick={() => closePosition(p.id, p.borrowed)}
-                  >
-                    {closing === p.id ? "Closing…" : "✕ Close Position"}
-                  </button>
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-                  {[
-                    { label: "Entry",      value: `$${p.entryPrice.toFixed(4)}` },
-                    { label: "Collateral", value: `$${p.collateral.toFixed(2)}`  },
-                    { label: "Borrowed",   value: `$${p.borrowed.toFixed(2)}`    },
-                    { label: "Size",       value: `$${p.notional.toFixed(2)}`    },
-                  ].map(({ label, value }) => (
-                    <div key={label}>
-                      <div className="metric-label" style={{ marginBottom: 3 }}>{label}</div>
-                      <div className="metric-value-sm">{value}</div>
-                    </div>
-                  ))}
-                </div>
-                <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>
-                    Opened {new Date(p.openedAt).toLocaleString()}
-                  </span>
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)" }}>·</span>
-                  <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>
-                    ID: {p.id}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
 
     </div>
   );

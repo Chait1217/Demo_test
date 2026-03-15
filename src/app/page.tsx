@@ -10,7 +10,7 @@ import { TransactionsView } from "@/components/transactions/TransactionsView";
 type Tab = "trade" | "vault" | "history";
 
 export default function HomePage() {
-  const { address, isConnected, isConnecting, connect, disconnect } = useWallet();
+  const { address, isConnected, isConnecting, connect, disconnect, connectError, isAlreadyPending } = useWallet();
   const { display: usdcDisplay } = useUsdcBalance();
   const [tab, setTab] = useState<Tab>("trade");
 
@@ -99,25 +99,41 @@ export default function HomePage() {
                 <span style={{ color: "var(--accent)", fontWeight: 600 }}>{usdcDisplay}</span>
               </div>
             )}
-            <button
-              style={{
-                background: isConnected ? "var(--surface-2)" : "var(--accent)",
-                border: isConnected ? "1px solid var(--border)" : "none",
-                borderRadius: 8,
-                padding: "7px 16px",
-                fontFamily: "var(--mono)",
-                fontSize: 12,
-                fontWeight: 600,
-                color: isConnected ? "var(--text-2)" : "#000",
-                cursor: "pointer",
-                transition: "all 150ms",
-                minWidth: 140,
-              }}
-              onClick={() => isConnected ? disconnect() : connect()}
-              disabled={isConnecting}
-            >
-              {isConnecting ? "Connecting…" : isConnected ? short : "Connect Wallet"}
-            </button>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+              <button
+                style={{
+                  background: isConnected ? "var(--surface-2)" : "var(--accent)",
+                  border: isConnected ? "1px solid var(--border)" : "none",
+                  borderRadius: 8,
+                  padding: "7px 16px",
+                  fontFamily: "var(--mono)",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: isConnected ? "var(--text-2)" : "#000",
+                  cursor: (isConnecting && !isAlreadyPending) ? "not-allowed" : "pointer",
+                  transition: "all 150ms",
+                  minWidth: 140,
+                  opacity: (isConnecting && !isAlreadyPending) ? 0.6 : 1,
+                }}
+                onClick={() => isConnected ? disconnect() : connect()}
+                disabled={isConnecting && !isAlreadyPending}
+              >
+                {isAlreadyPending
+                  ? "Retry Connect"
+                  : isConnecting ? "Connecting…"
+                  : isConnected ? short
+                  : "Connect Wallet"}
+              </button>
+              {connectError && (
+                <span style={{ fontFamily: "var(--mono)", fontSize: 10, color: "#ff6b6b" }}>
+                  {isAlreadyPending
+                    ? "Open MetaMask and approve, or click Retry"
+                    : connectError.message.includes("provider")
+                    ? "No wallet detected — install MetaMask"
+                    : connectError.message.slice(0, 60)}
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </header>

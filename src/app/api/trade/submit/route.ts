@@ -1,11 +1,11 @@
 import { NextRequest } from "next/server";
-import { Address, formatUnits, parseUnits } from "viem";
+import { Address, formatUnits } from "viem";
 import { createPublicClient, http } from "viem";
-import { ethers } from "ethers";
-import { POLYGON_CHAIN, USDCe_ADDRESS, VAULT_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
+import { POLYGON_CHAIN, USDCe_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
+// Note: vault borrow is now executed client-side (TradingView.tsx) so the
+// borrowed USDC goes directly to the user's wallet, not the server wallet.
 import { computePositionPreview } from "@/lib/leverage";
 import { recordOpenPosition } from "@/server/positionsStore";
-import { leveragedVaultAbi } from "@/lib/vaultAbi";
 
 const ERC20_ABI = [
   { constant: true, inputs: [{ name: "owner", type: "address" }], name: "balanceOf", outputs: [{ name: "", type: "uint256" }], type: "function" },
@@ -19,15 +19,6 @@ const publicClient = createPublicClient({
     retryCount: 0,
   }),
 });
-
-function getVaultWriteContract() {
-  const rpcUrl = process.env.POLYGON_RPC_URL ?? "https://polygon-rpc.com";
-  const pk     = process.env.POLYMARKET_PRIVATE_KEY;
-  if (!pk) throw new Error("POLYMARKET_PRIVATE_KEY not set");
-  const provider = new ethers.providers.JsonRpcProvider(rpcUrl);
-  const signer   = new ethers.Wallet(pk, provider);
-  return new ethers.Contract(VAULT_ADDRESS, leveragedVaultAbi as any, signer);
-}
 
 // ── Polymarket auth: derive API creds from user's L1 EIP-712 signature ──────
 
@@ -105,18 +96,32 @@ async function postSignedOrder(
   creds: { key: string; secret: string; passphrase: string },
   orderWithSig: Record<string, unknown>,
 ): Promise<{ orderId?: string; orderID?: string; status?: string }> {
+  // Normalise fields to match what the CLOB client's orderToJson produces:
+  //   salt  → integer (not string)
+  //   side  → "BUY" | "SELL" string (not 0/1 number)
+  //   owner → API key (creds.key), NOT wallet address
+  const normalisedOrder = {
+    ...orderWithSig,
+    salt: Number.parseInt(orderWithSig.salt as string, 10),
+    side: (orderWithSig.side === 0 || orderWithSig.side === "0") ? "BUY" : "SELL",
+  };
+
   const ts   = String(Math.floor(Date.now() / 1000));
-  const body = JSON.stringify({ order: orderWithSig, orderType: "GTC", expose_neg_risk: false });
+  const body = JSON.stringify({ deferExec: false, order: normalisedOrder, owner: creds.key, orderType: "GTC" });
   const hmac = await buildHmacSig(creds.secret, ts, "POST", "/order", body);
+
+  // Log key order fields to diagnose balance/allowance issues
+  const o = normalisedOrder as Record<string, unknown>;
+  console.log(`[submit] posting order — maker:${walletAddress} makerAmount:${Number(o.makerAmount)/1e6} USDC takerAmount:${Number(o.takerAmount)/1e6} tokens side:${o.side}`);
 
   const res = await fetch(`${POLYMARKET_API_HOST}/order`, {
     method:  "POST",
     headers: {
       "Content-Type": "application/json",
-      POLY_ADDRESS:   walletAddress,
-      POLY_SIGNATURE: hmac,
-      POLY_TIMESTAMP: ts,
-      POLY_API_KEY:   creds.key,
+      POLY_ADDRESS:    walletAddress,   // signer's wallet address (not the API key)
+      POLY_SIGNATURE:  hmac,
+      POLY_TIMESTAMP:  ts,
+      POLY_API_KEY:    creds.key,
       POLY_PASSPHRASE: creds.passphrase,
     },
     body,
@@ -181,23 +186,39 @@ export async function POST(req: NextRequest) {
       return new Response(`Insufficient USDC.e balance. Need $${collateral.toFixed(2)}.`, { status: 400 });
     }
 
-    // ── 2. Vault borrow ──────────────────────────────────────────────────────
-    const ZERO    = "0x0000000000000000000000000000000000000000" as Address;
-    const hasVault = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO;
-    const preview  = computePositionPreview({ collateral, leverage }, 0);
+    // vault.borrow() is executed client-side (from the user's own wallet) so the
+    // borrowed USDC lands in the user's wallet before the order is placed.
 
-    if (hasVault && preview.borrowed > 0 && process.env.POLYMARKET_PRIVATE_KEY) {
-      try {
-        const vault     = getVaultWriteContract();
-        const borrowRaw = parseUnits(preview.borrowed.toFixed(6), 6);
-        await vault.borrow(borrowRaw);
-      } catch (e: any) {
-        console.warn("[submit] vault borrow failed (non-fatal):", e.message);
-      }
-    }
+    const preview = computePositionPreview({ collateral, leverage }, 0);
 
     // ── 3. Derive API creds from user's L1 signature ─────────────────────────
     const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce);
+
+    // ── 3b. Tell the CLOB to re-read on-chain balance/allowance ──────────────
+    // asset_type must be the string "COLLATERAL" (SDK enum), NOT the integer 0.
+    // Passing 0 returns 200 but silently does nothing — the cache stays stale.
+    try {
+      const baTs   = String(Math.floor(Date.now() / 1000));
+      const baPath = "/balance-allowance/update";
+      const baHmac = await buildHmacSig(creds.secret, baTs, "GET", baPath);
+      const baRes  = await fetch(
+        `${POLYMARKET_API_HOST}${baPath}?asset_type=COLLATERAL&signature_type=0`,
+        {
+          headers: {
+            POLY_ADDRESS:    walletAddress,
+            POLY_SIGNATURE:  baHmac,
+            POLY_TIMESTAMP:  baTs,
+            POLY_API_KEY:    creds.key,
+            POLY_PASSPHRASE: creds.passphrase,
+          },
+          signal: AbortSignal.timeout(8_000),
+        },
+      );
+      const baBody = await baRes.text();
+      console.log(`[submit] balance-allowance update → ${baRes.status}: ${baBody}`);
+    } catch (e: any) {
+      console.warn("[submit] balance-allowance refresh failed (non-fatal):", e.message);
+    }
 
     // ── 4. Post the pre-signed order ─────────────────────────────────────────
     const orderWithSig = { ...orderStruct, signature: orderSignature };

@@ -2,8 +2,25 @@ import { NextRequest } from "next/server";
 import { getTokenIds } from "@/server/polymarketClient";
 import { computePositionPreview } from "@/lib/leverage";
 
-const CTF_EXCHANGE_ADDRESS = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+const CONTRACTS = {
+  exchange:        "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+  negRiskExchange: "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+};
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+async function getExchangeAddress(tokenId: string): Promise<string> {
+  try {
+    const res = await fetch(
+      `https://clob.polymarket.com/neg-risk?token_id=${tokenId}`,
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    if (res.ok) {
+      const data = await res.json() as { neg_risk?: boolean };
+      if (data.neg_risk) return CONTRACTS.negRiskExchange;
+    }
+  } catch { /* network error — fall back to standard exchange */ }
+  return CONTRACTS.exchange;
+}
 
 // Rounding helpers (mirrors CLOB client helpers.js for 0.01 tick size)
 const RC = { price: 2, size: 2, amount: 4 };
@@ -34,29 +51,47 @@ function getBuyAmounts(size: number, price: number) {
 
 export async function POST(req: NextRequest) {
   try {
-    const { walletAddress, side, collateral, leverage, price } = await req.json() as {
+    const { walletAddress, side, collateral, leverage, price, yesTokenId, noTokenId } = await req.json() as {
       walletAddress: string;
       side: "YES" | "NO";
       collateral: number;
       leverage: number;
       price: number;
+      yesTokenId?: string;
+      noTokenId?: string;
     };
 
     if (!walletAddress || !side || !collateral || !leverage || !price) {
       return new Response("Invalid payload", { status: 400 });
     }
 
-    const tokenIds = await getTokenIds();
-    const tokenId  = side === "YES" ? tokenIds.yes : tokenIds.no;
+    // Use client-supplied token IDs first (avoids a redundant Gamma API call
+    // and works even when the API is unreachable server-side).
+    let tokenId: string;
+    if (yesTokenId && noTokenId) {
+      tokenId = side === "YES" ? yesTokenId : noTokenId;
+    } else {
+      const tokenIds = await getTokenIds();
+      tokenId = side === "YES" ? tokenIds.yes : tokenIds.no;
+    }
 
-    // Size in tokens = notional USDC / price
-    const preview    = computePositionPreview({ collateral, leverage }, 0);
-    const tokenCount = price > 0 ? preview.notional / price : preview.notional;
+    // Size in tokens = collateral USDC / price.
+    // CRITICAL: use the same rounded price that getBuyAmounts will use (2 d.p., tick size 0.01).
+    // If we divide by the raw price but multiply back by the rounded price we can get
+    // makerAmount > collateral (e.g. price=0.715 → roundedPrice=0.72, causing a 0.6% overshoot).
+    // Dividing by the rounded price first guarantees makerAmount ≤ collateral.
+    const preview      = computePositionPreview({ collateral, leverage }, 0);
+    const roundedPrice = Math.round(price * 100) / 100 || price;   // 2 d.p. = CLOB tick size
+    // Use notional (collateral + borrowed) so the order covers the full leveraged size.
+    const tokenCount   = roundedPrice > 0 ? preview.notional / roundedPrice : preview.notional;
 
     const { makerAmount, takerAmount } = getBuyAmounts(tokenCount, price);
 
-    const salt        = Math.round(Math.random() * Date.now()).toString();
-    const l1Timestamp = Math.floor(Date.now() / 1000);
+    const [exchangeAddress, salt, l1Timestamp] = await Promise.all([
+      getExchangeAddress(tokenId).then(addr => { console.log(`[prepare] tokenId=${tokenId.slice(0,10)}… exchange=${addr}`); return addr; }),
+      Promise.resolve(Math.round(Math.random() * Date.now()).toString()),
+      Promise.resolve(Math.floor(Date.now() / 1000)),
+    ]);
 
     // Unsigned order struct — matches the EIP-712 Order type exactly
     const orderStruct = {
@@ -76,7 +111,7 @@ export async function POST(req: NextRequest) {
 
     return Response.json({
       orderStruct,
-      exchangeAddress: CTF_EXCHANGE_ADDRESS,
+      exchangeAddress,
       l1Timestamp,
       l1Nonce: 0,
       preview,

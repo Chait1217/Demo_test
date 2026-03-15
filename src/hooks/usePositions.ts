@@ -34,6 +34,13 @@ export function addPosition(p: Position) {
   notify();
 }
 
+/** Replace specific fields on an existing position (e.g. corrected tokenCount after Sync). */
+export function updatePosition(id: string, patch: Partial<Position>) {
+  _positions = _positions.map((p) => p.id === id ? { ...p, ...patch } : p);
+  saveAll(_positions);
+  notify();
+}
+
 export function closePositionLocal(id: string) {
   _positions = _positions.map((p) =>
     p.id === id
