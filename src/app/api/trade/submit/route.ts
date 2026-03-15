@@ -119,6 +119,10 @@ async function postSignedOrder(
   const body = JSON.stringify({ deferExec: false, order: normalisedOrder, owner: creds.key, orderType: "GTC" });
   const hmac = await buildHmacSig(creds.secret, ts, "POST", "/order", body);
 
+  // Log key order fields to diagnose balance/allowance issues
+  const o = normalisedOrder as Record<string, unknown>;
+  console.log(`[submit] posting order — maker:${walletAddress} makerAmount:${Number(o.makerAmount)/1e6} USDC takerAmount:${Number(o.takerAmount)/1e6} tokens side:${o.side}`);
+
   const res = await fetch(`${POLYMARKET_API_HOST}/order`, {
     method:  "POST",
     headers: {
@@ -210,24 +214,27 @@ export async function POST(req: NextRequest) {
     const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce);
 
     // ── 3b. Tell the CLOB to re-read on-chain balance/allowance ──────────────
-    // The CLOB caches the maker's USDC.e balance and allowance. A fresh approval
-    // (or any other on-chain change) is invisible to it until we call this endpoint.
-    // Without this step, even a valid approval gets rejected as "not enough allowance".
+    // asset_type must be the string "COLLATERAL" (SDK enum), NOT the integer 0.
+    // Passing 0 returns 200 but silently does nothing — the cache stays stale.
     try {
       const baTs   = String(Math.floor(Date.now() / 1000));
       const baPath = "/balance-allowance/update";
       const baHmac = await buildHmacSig(creds.secret, baTs, "GET", baPath);
-      await fetch(`${POLYMARKET_API_HOST}${baPath}?asset_type=0&signature_type=0`, {
-        headers: {
-          POLY_ADDRESS:    walletAddress,
-          POLY_SIGNATURE:  baHmac,
-          POLY_TIMESTAMP:  baTs,
-          POLY_API_KEY:    creds.key,
-          POLY_PASSPHRASE: creds.passphrase,
+      const baRes  = await fetch(
+        `${POLYMARKET_API_HOST}${baPath}?asset_type=COLLATERAL&signature_type=0`,
+        {
+          headers: {
+            POLY_ADDRESS:    walletAddress,
+            POLY_SIGNATURE:  baHmac,
+            POLY_TIMESTAMP:  baTs,
+            POLY_API_KEY:    creds.key,
+            POLY_PASSPHRASE: creds.passphrase,
+          },
+          signal: AbortSignal.timeout(8_000),
         },
-        signal: AbortSignal.timeout(8_000),
-      });
-      console.log("[submit] CLOB balance-allowance cache refreshed");
+      );
+      const baBody = await baRes.text();
+      console.log(`[submit] balance-allowance update → ${baRes.status}: ${baBody}`);
     } catch (e: any) {
       console.warn("[submit] balance-allowance refresh failed (non-fatal):", e.message);
     }
