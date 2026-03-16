@@ -273,7 +273,9 @@ export function TradingView() {
         },
         state:    "OPEN",
         openedAt: new Date().toISOString(),
-        txHash:   openTxHash, // Real Polygon tx hash (approve tx) if a new approval was needed
+        // Use vault borrow transfer hash as the primary tx hash — it's the
+        // on-chain proof the borrowed funds reached the user's wallet.
+        txHash: json.transferHash ?? openTxHash,
         // Store fields needed to SELL tokens back when closing a filled position
         tokenId:         orderStruct.tokenId as string,
         tokenCount:      Number(BigInt(orderStruct.takerAmount as string)) / 1e6,
@@ -473,9 +475,55 @@ export function TradingView() {
         throw new Error(`Close failed (${closeRes.status}): ${errText}`);
       }
 
-      // Only mark CLOSED locally after server confirms the SELL was posted
+      const closeJson = await closeRes.json();
+
+      // Mark CLOSED locally immediately so the UI clears the position
       closePositionLocal(positionId);
-      setSuccess("Position closed — SELL order submitted to Polymarket.");
+
+      // Save closeTxHash if the repayment already happened (cancel path)
+      if (closeJson.closeTxHash) {
+        updatePosition(positionId, { closeTxHash: closeJson.closeTxHash });
+      }
+
+      if (closeJson.repayPending && closeJson.repayAmount > 0) {
+        // SELL path — SELL proceeds are in-flight. Wait ~10s for settlement,
+        // then pull the borrowed repayment. This prevents the -3 wallet drain
+        // that would occur if we pulled before the 3 USDC proceeds arrived.
+        setSuccess("SELL order submitted — awaiting settlement (~10s)…");
+        await new Promise(r => setTimeout(r, 10_000));
+        setSubmitStep("Settling repayment…");
+
+        // Retry up to 3 times in case the SELL settles slightly late
+        let settled = false;
+        for (let attempt = 0; attempt < 3 && !settled; attempt++) {
+          const settleRes = await fetch("/api/trade/settle", {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({
+              orderId:       positionId,
+              repayAmount:   closeJson.repayAmount,
+              walletAddress: address,
+            }),
+          });
+          if (settleRes.ok) {
+            const settleJson = await settleRes.json();
+            if (settleJson.closeTxHash) {
+              updatePosition(positionId, { closeTxHash: settleJson.closeTxHash });
+            }
+            settled = true;
+          } else if (settleRes.status === 409) {
+            // Proceeds not yet available — wait another 5s and retry
+            await new Promise(r => setTimeout(r, 5_000));
+          } else {
+            const errText = await settleRes.text();
+            console.warn("[close] settle failed (non-fatal):", errText);
+            settled = true; // Don't loop forever; position is already marked closed
+          }
+        }
+        setSuccess("Position closed — SELL order submitted to Polymarket.");
+      } else {
+        setSuccess("Position closed.");
+      }
     } catch (e: any) {
       setError(e.message);
     } finally {

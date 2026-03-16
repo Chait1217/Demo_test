@@ -6,6 +6,7 @@ import { POLYGON_CHAIN, USDCe_ADDRESS, VAULT_ADDRESS, POLYMARKET_API_HOST } from
 import { leveragedVaultAbi } from "@/lib/vaultAbi";
 import { computePositionPreview } from "@/lib/leverage";
 import { recordOpenPosition } from "@/server/positionsStore";
+import { borrowFromVault } from "@/server/vaultState";
 
 const ERC20_ABI = [
   { constant: true, inputs: [{ name: "owner", type: "address" }], name: "balanceOf", outputs: [{ name: "", type: "uint256" }], type: "function" },
@@ -202,6 +203,10 @@ export async function POST(req: NextRequest) {
     const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
     const serverPk  = process.env.POLYMARKET_PRIVATE_KEY;
 
+    // transferHash is returned to the client as the position's primary tx hash —
+    // it's the on-chain proof that borrowed funds reached the user's wallet.
+    let transferHash: string | undefined;
+
     if (hasVault && preview.borrowed > 0 && serverPk) {
       try {
         const borrowRaw  = BigInt(Math.round(preview.borrowed * 1_000_000));
@@ -228,14 +233,16 @@ export async function POST(req: NextRequest) {
           inputs:  [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
           outputs: [{ name: "", type: "bool" }],
         }] as const;
-        const transferHash = await walletClient.writeContract({
+        const tx = await walletClient.writeContract({
           address:      USDCe_ADDRESS,
           abi:          ERC20_TRANSFER_ABI,
           functionName: "transfer",
           args:         [walletAddress as `0x${string}`, borrowRaw],
         });
-        await publicClient.waitForTransactionReceipt({ hash: transferHash, timeout: 30_000 });
+        await publicClient.waitForTransactionReceipt({ hash: tx, timeout: 30_000 });
+        transferHash = tx; // real on-chain tx the user can verify on Polygonscan
 
+        borrowFromVault(preview.borrowed);
         console.log(`[submit] vault borrow + forward: $${preview.borrowed.toFixed(2)} USDC → ${walletAddress}`);
       } catch (e: any) {
         // Fatal: if borrow fails the user won't have enough USDC for the notional-sized
@@ -297,7 +304,7 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    return Response.json({ orderId, status: orderStatus, preview });
+    return Response.json({ orderId, status: orderStatus, preview, transferHash });
   } catch (err: any) {
     console.error("[submit] error:", err);
     return new Response(err.message ?? "Internal error", { status: 500 });

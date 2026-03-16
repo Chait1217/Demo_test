@@ -20,7 +20,8 @@ export interface Position {
   state: PositionState;
   openedAt: string;
   closedAt?: string;
-  txHash?: string;
+  txHash?: string;      // open tx — vault borrow transfer to user
+  closeTxHash?: string; // close tx — repayment pull from user to vault
   // Fields needed to close a filled position (SELL the outcome tokens back)
   tokenId?: string;
   tokenCount?: number;      // actual tokens received (takerAmount / 1e6)

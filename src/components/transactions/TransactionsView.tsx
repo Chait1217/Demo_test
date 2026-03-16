@@ -87,7 +87,8 @@ export function TransactionsView() {
                 <th>Size</th>
                 <th>Leverage</th>
                 <th>Open Fee</th>
-                <th>Tx Hash</th>
+                <th>Open Tx</th>
+                <th>Close Tx</th>
               </tr>
             </thead>
             <tbody>
@@ -125,6 +126,21 @@ export function TransactionsView() {
                       <span style={{ color: "var(--text-3)", fontSize: 10 }} title={p.id}>
                         {p.id.length > 12 ? `${p.id.slice(0, 8)}…${p.id.slice(-4)}` : p.id}
                       </span>
+                    )}
+                  </td>
+                  <td>
+                    {p.closeTxHash ? (
+                      <a
+                        href={`https://polygonscan.com/tx/${p.closeTxHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--accent)", textDecoration: "none" }}
+                        title={p.closeTxHash}
+                      >
+                        {p.closeTxHash.slice(0, 8)}…{p.closeTxHash.slice(-4)}
+                      </a>
+                    ) : (
+                      <span style={{ color: "var(--text-3)", fontSize: 10 }}>—</span>
                     )}
                   </td>
                 </tr>

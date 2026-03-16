@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { recordClosePosition } from "@/server/positionsStore";
+import { repayToVault } from "@/server/vaultState";
 import { POLYGON_CHAIN, USDCe_ADDRESS, VAULT_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
 import { leveragedVaultAbi } from "@/lib/vaultAbi";
 
@@ -174,6 +175,12 @@ export async function POST(req: NextRequest) {
     const isSimulated  = orderId.startsWith("sim_") || orderId.startsWith("placed_");
     const isRecoveryId = orderId.startsWith("balance-");
 
+    // Track whether the position was filled (SELL posted) vs cancelled.
+    // Repayment is deferred for the SELL path because the user's 3 USDC is locked
+    // in the position tokens — pulling repayment before SELL proceeds arrive drains
+    // the wallet by the full notional (e.g. -3 for 1.5 collateral + 2x leverage).
+    let isSellPath = false;
+
     if (!isSimulated && walletAddress && l1Signature && l1Timestamp != null) {
       const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce ?? 0);
 
@@ -189,6 +196,7 @@ export async function POST(req: NextRequest) {
           const sellWithSig = { ...sellOrderStruct, signature: sellOrderSignature };
           const sellResp = await postSellOrder(walletAddress, creds, sellWithSig);
           console.log("[close] SELL order posted:", sellResp);
+          isSellPath = true; // repayment must be deferred until SELL proceeds arrive
         } else if (!isRecoveryId) {
           // Real order ID but no SELL order provided — cancel succeeded or order expired
           console.log("[close] order cancelled / no SELL needed for:", orderId);
@@ -199,72 +207,91 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 2. Repay vault via approve-and-pull (atomic, FATAL on failure) ───────────
-    // Safety pattern: user approves the engine wallet to pull their USDC.e
-    // BEFORE this route is called (client does approve, not push). The engine
-    // then does transferFrom(user → engine) atomically with vault.repay().
-    // If either step fails we throw — the position stays OPEN and no USDC.e
-    // ever leaves the user's wallet.
-    const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-    const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
-    const serverPk  = process.env.POLYMARKET_PRIVATE_KEY;
+    // ── 2. Repay vault ────────────────────────────────────────────────────────
+    // For CANCEL path: repay immediately (Polymarket refunds user, so they have USDC).
+    // For SELL path: defer repayment — the user spent their USDC on tokens and the
+    //   3 USDC proceeds are still in the pending SELL order. Pulling repayment now
+    //   would drain the wallet by the full notional (the -3 bug). The client will
+    //   call /api/trade/settle after the SELL fills (~8s) to complete repayment.
+    // Always update the in-memory vault state so the available liquidity display
+    // stays accurate regardless of which path we take.
+    if (repayAmount && repayAmount > 0) {
+      repayToVault(repayAmount);
+    }
 
-    if (hasVault && repayAmount && repayAmount > 0 && serverPk && walletAddress) {
-      const repayRaw   = BigInt(Math.round(repayAmount * 1_000_000));
-      const rpcUrl     = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
-      const account    = privateKeyToAccount(serverPk as `0x${string}`);
-      const walletClient = createWalletClient({
-        account,
-        chain:     POLYGON_CHAIN,
-        transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
-      });
+    let closeTxHash: string | undefined;
 
-      const ERC20_ABI = [
-        {
-          name: "transferFrom", type: "function", stateMutability: "nonpayable",
-          inputs:  [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "amount", type: "uint256" }],
-          outputs: [{ name: "", type: "bool" }],
-        },
-        {
-          name: "approve", type: "function", stateMutability: "nonpayable",
-          inputs:  [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
-          outputs: [{ name: "", type: "bool" }],
-        },
-      ] as const;
+    if (!isSellPath) {
+      // CANCEL path — repay on-chain immediately (user has USDC available)
+      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+      const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
+      const serverPk  = process.env.POLYMARKET_PRIVATE_KEY;
 
-      // Step 1: pull USDC.e from user into engine wallet (user pre-approved this)
-      const pullHash = await walletClient.writeContract({
-        address:      USDCe_ADDRESS,
-        abi:          ERC20_ABI,
-        functionName: "transferFrom",
-        args:         [walletAddress as `0x${string}`, account.address, repayRaw],
-      });
-      await publicClient.waitForTransactionReceipt({ hash: pullHash, timeout: 30_000 });
-      console.log(`[close] pulled $${repayAmount.toFixed(2)} USDC.e from user to engine`);
+      if (hasVault && repayAmount && repayAmount > 0 && serverPk && walletAddress) {
+        const repayRaw   = BigInt(Math.round(repayAmount * 1_000_000));
+        const rpcUrl     = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
+        const account    = privateKeyToAccount(serverPk as `0x${string}`);
+        const walletClient = createWalletClient({
+          account,
+          chain:     POLYGON_CHAIN,
+          transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
+        });
 
-      // Step 2: engine approves vault to pull, then vault.repay()
-      const approveHash = await walletClient.writeContract({
-        address:      USDCe_ADDRESS,
-        abi:          ERC20_ABI,
-        functionName: "approve",
-        args:         [VAULT_ADDRESS, repayRaw],
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveHash, timeout: 30_000 });
+        const ERC20_ABI = [
+          {
+            name: "transferFrom", type: "function", stateMutability: "nonpayable",
+            inputs:  [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "amount", type: "uint256" }],
+            outputs: [{ name: "", type: "bool" }],
+          },
+          {
+            name: "approve", type: "function", stateMutability: "nonpayable",
+            inputs:  [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
+            outputs: [{ name: "", type: "bool" }],
+          },
+        ] as const;
 
-      const repayHash = await walletClient.writeContract({
-        address:      VAULT_ADDRESS,
-        abi:          leveragedVaultAbi,
-        functionName: "repay",
-        args:         [repayRaw],
-      });
-      await publicClient.waitForTransactionReceipt({ hash: repayHash, timeout: 30_000 });
-      console.log(`[close] vault repay: $${repayAmount.toFixed(2)} USDC.e`);
+        const pullHash = await walletClient.writeContract({
+          address:      USDCe_ADDRESS,
+          abi:          ERC20_ABI,
+          functionName: "transferFrom",
+          args:         [walletAddress as `0x${string}`, account.address, repayRaw],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: pullHash, timeout: 30_000 });
+        console.log(`[close] pulled $${repayAmount.toFixed(2)} USDC.e from user to engine`);
+        closeTxHash = pullHash;
+
+        const approveHash = await walletClient.writeContract({
+          address:      USDCe_ADDRESS,
+          abi:          ERC20_ABI,
+          functionName: "approve",
+          args:         [VAULT_ADDRESS, repayRaw],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveHash, timeout: 30_000 });
+
+        const repayHash = await walletClient.writeContract({
+          address:      VAULT_ADDRESS,
+          abi:          leveragedVaultAbi,
+          functionName: "repay",
+          args:         [repayRaw],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: repayHash, timeout: 30_000 });
+        console.log(`[close] vault repay: $${repayAmount.toFixed(2)} USDC.e`);
+      }
+    } else {
+      console.log(`[close] SELL path — vault repayment deferred; client will call /api/trade/settle after SELL fills`);
     }
 
     // ── 3. Record closure ─────────────────────────────────────────────────────
     recordClosePosition(orderId);
 
-    return Response.json({ ok: true, orderId });
+    return Response.json({
+      ok:          true,
+      orderId,
+      closeTxHash,
+      // repayPending=true tells the client to call /api/trade/settle after SELL fills
+      repayPending: isSellPath && !!repayAmount && repayAmount > 0,
+      repayAmount:  isSellPath ? repayAmount : undefined,
+    });
   } catch (err: any) {
     console.error("[close] error:", err);
     return new Response(err.message ?? "Internal error", { status: 500 });
