@@ -199,51 +199,66 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 2. Repay vault (server is the marginEngine, onlyEngine on repay()) ──────
-    // The user sent borrowed USDC to the server wallet (engine) before calling
-    // this route. The server now pulls those funds into the vault via repay().
+    // ── 2. Repay vault via approve-and-pull (atomic, FATAL on failure) ───────────
+    // Safety pattern: user approves the engine wallet to pull their USDC.e
+    // BEFORE this route is called (client does approve, not push). The engine
+    // then does transferFrom(user → engine) atomically with vault.repay().
+    // If either step fails we throw — the position stays OPEN and no USDC.e
+    // ever leaves the user's wallet.
     const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
     const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
     const serverPk  = process.env.POLYMARKET_PRIVATE_KEY;
 
-    if (hasVault && repayAmount && repayAmount > 0 && serverPk) {
-      try {
-        const repayRaw   = BigInt(Math.round(repayAmount * 1_000_000));
-        const rpcUrl     = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
-        const account    = privateKeyToAccount(serverPk as `0x${string}`);
-        const walletClient = createWalletClient({
-          account,
-          chain:     POLYGON_CHAIN,
-          transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
-        });
+    if (hasVault && repayAmount && repayAmount > 0 && serverPk && walletAddress) {
+      const repayRaw   = BigInt(Math.round(repayAmount * 1_000_000));
+      const rpcUrl     = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
+      const account    = privateKeyToAccount(serverPk as `0x${string}`);
+      const walletClient = createWalletClient({
+        account,
+        chain:     POLYGON_CHAIN,
+        transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
+      });
 
-        const ERC20_APPROVE_ABI = [{
+      const ERC20_ABI = [
+        {
+          name: "transferFrom", type: "function", stateMutability: "nonpayable",
+          inputs:  [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "amount", type: "uint256" }],
+          outputs: [{ name: "", type: "bool" }],
+        },
+        {
           name: "approve", type: "function", stateMutability: "nonpayable",
           inputs:  [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
           outputs: [{ name: "", type: "bool" }],
-        }] as const;
+        },
+      ] as const;
 
-        // vault.repay() calls transferFrom(engine → vault), so the engine wallet
-        // must approve the vault to pull its USDC before calling repay().
-        const approveHash = await walletClient.writeContract({
-          address:      USDCe_ADDRESS,
-          abi:          ERC20_APPROVE_ABI,
-          functionName: "approve",
-          args:         [VAULT_ADDRESS, repayRaw],
-        });
-        await publicClient.waitForTransactionReceipt({ hash: approveHash, timeout: 30_000 });
+      // Step 1: pull USDC.e from user into engine wallet (user pre-approved this)
+      const pullHash = await walletClient.writeContract({
+        address:      USDCe_ADDRESS,
+        abi:          ERC20_ABI,
+        functionName: "transferFrom",
+        args:         [walletAddress as `0x${string}`, account.address, repayRaw],
+      });
+      await publicClient.waitForTransactionReceipt({ hash: pullHash, timeout: 30_000 });
+      console.log(`[close] pulled $${repayAmount.toFixed(2)} USDC.e from user to engine`);
 
-        const repayHash = await walletClient.writeContract({
-          address:      VAULT_ADDRESS,
-          abi:          leveragedVaultAbi,
-          functionName: "repay",
-          args:         [repayRaw],
-        });
-        await publicClient.waitForTransactionReceipt({ hash: repayHash, timeout: 30_000 });
-        console.log(`[close] vault repay: $${repayAmount.toFixed(2)} USDC`);
-      } catch (e: any) {
-        console.warn("[close] vault repay non-fatal:", e.message);
-      }
+      // Step 2: engine approves vault to pull, then vault.repay()
+      const approveHash = await walletClient.writeContract({
+        address:      USDCe_ADDRESS,
+        abi:          ERC20_ABI,
+        functionName: "approve",
+        args:         [VAULT_ADDRESS, repayRaw],
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveHash, timeout: 30_000 });
+
+      const repayHash = await walletClient.writeContract({
+        address:      VAULT_ADDRESS,
+        abi:          leveragedVaultAbi,
+        functionName: "repay",
+        args:         [repayRaw],
+      });
+      await publicClient.waitForTransactionReceipt({ hash: repayHash, timeout: 30_000 });
+      console.log(`[close] vault repay: $${repayAmount.toFixed(2)} USDC.e`);
     }
 
     // ── 3. Record closure ─────────────────────────────────────────────────────

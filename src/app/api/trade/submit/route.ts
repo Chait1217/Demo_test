@@ -180,7 +180,13 @@ export async function POST(req: NextRequest) {
         }
       }),
       raceTimeout(4_000),
-    ]).catch(() => { /* RPC timeout — skip check */ });
+    ]).catch((e: Error) => {
+      // RPC timeout is acceptable (client already did its own balance check);
+      // any other error is unexpected — log it but don't block the order.
+      if (!e.message.includes("timeout")) {
+        console.warn("[submit] balance check error (non-fatal):", e.message);
+      }
+    });
 
     if (insufficientBalance) {
       return new Response(`Insufficient USDC.e balance. Need $${collateral.toFixed(2)}.`, { status: 400 });

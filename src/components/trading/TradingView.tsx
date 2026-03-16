@@ -423,32 +423,31 @@ export function TradingView() {
         }
       }
 
-      // ── Step: Send borrowed USDC to engine wallet BEFORE calling close route ──
-      // vault.repay() is onlyEngine and uses transferFrom(engine→vault).
-      // The engine must have USDC first. The user transfers it here (before the
-      // close route), so when the server calls vault.repay() it already holds it.
+      // ── Step: Approve engine to pull borrowed USDC.e (approve-and-pull) ─────────
+      // The close route does transferFrom(user→engine) + vault.repay() atomically.
+      // If vault.repay() fails the server returns 500, the position stays open, and
+      // this approval is never exercised — the user's USDC.e stays safe.
       if (!isSimulated && borrowed > 0) {
-        try {
-          const engRes = await fetch("/api/engine-address");
-          const { address: engineAddress } = await engRes.json() as { address: string | null };
-          if (engineAddress) {
-            const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
-            setSubmitStep("Sending repayment to vault engine… (wallet prompt)");
-            const ERC20_TRANSFER_ABI = [{
-              name: "transfer", type: "function", stateMutability: "nonpayable",
-              inputs:  [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
-              outputs: [{ name: "", type: "bool" }],
-            }] as const;
-            const transferTx = await writeContractAsync({
+        const engRes = await fetch("/api/engine-address");
+        const { address: engineAddress } = await engRes.json() as { address: string | null };
+        if (engineAddress) {
+          const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
+          const currentAllowance = await publicClient!.readContract({
+            address:      USDCe_ADDRESS,
+            abi:          ERC20_APPROVE_ABI,
+            functionName: "allowance",
+            args:         [address as `0x${string}`, engineAddress as `0x${string}`],
+          }) as bigint;
+          if (currentAllowance < repayRaw) {
+            setSubmitStep("Approve repayment… (wallet prompt)");
+            const approveTx = await writeContractAsync({
               address:      USDCe_ADDRESS,
-              abi:          ERC20_TRANSFER_ABI,
-              functionName: "transfer",
+              abi:          ERC20_APPROVE_ABI,
+              functionName: "approve",
               args:         [engineAddress as `0x${string}`, repayRaw],
             });
-            await publicClient!.waitForTransactionReceipt({ hash: transferTx, timeout: 60_000 });
+            await publicClient!.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
           }
-        } catch (repayErr: any) {
-          console.warn("[close] repay transfer non-fatal:", repayErr.message);
         }
       }
 
