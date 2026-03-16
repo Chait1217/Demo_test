@@ -82,6 +82,9 @@ export function TradingView() {
   const [submitStep, setSubmitStep] = useState<string>("");
   const [closing, setClosing]       = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState<string | null>(null);
+  const [confirmClosePreview, setConfirmClosePreview] = useState<{
+    id: string; bestBid: number | null; loading: boolean;
+  } | null>(null);
   const [syncing, setSyncing]       = useState(false);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
@@ -290,6 +293,27 @@ export function TradingView() {
     } finally {
       setSubmitting(false);
       setSubmitStep("");
+    }
+  }
+
+  async function enterConfirmClose(positionId: string, tokenId?: string) {
+    setConfirmClose(positionId);
+    setConfirmClosePreview({ id: positionId, bestBid: null, loading: true });
+    if (tokenId) {
+      try {
+        const bookRes = await fetch(
+          `https://clob.polymarket.com/book?token_id=${tokenId}`,
+          { signal: AbortSignal.timeout(5_000) },
+        );
+        const book = bookRes.ok ? await bookRes.json() as { bids?: { price: string }[] } : { bids: [] };
+        const bids = (book.bids ?? []) as { price: string }[];
+        const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : null;
+        setConfirmClosePreview({ id: positionId, bestBid, loading: false });
+      } catch {
+        setConfirmClosePreview({ id: positionId, bestBid: null, loading: false });
+      }
+    } else {
+      setConfirmClosePreview({ id: positionId, bestBid: null, loading: false });
     }
   }
 
@@ -690,6 +714,13 @@ export function TradingView() {
               const pnlPct    = p.collateral > 0 ? (netPnl / p.collateral) * 100 : 0;
               const pnlColor  = netPnl >= 0 ? "var(--yes-color)" : "var(--danger)";
               const isConfirming = confirmClose === p.id;
+              const preview = isConfirming && confirmClosePreview?.id === p.id ? confirmClosePreview : null;
+              // If we have a real bestBid, compute exact payout; otherwise fall back to estimated exitPx
+              const closePx      = preview?.bestBid ?? exitPx;
+              const sellProceeds = p.tokenCount ? (p.tokenCount / 1_000_000) * closePx : p.notional * (closePx / (p.entryPrice || closePx));
+              const netPayout    = sellProceeds - p.borrowed;
+              const confirmPnl   = netPayout - p.collateral;
+              const confirmPnlColor = confirmPnl >= 0 ? "var(--yes-color)" : "var(--danger)";
               return (
               <div key={p.id} style={{ background: "var(--surface-2)", border: `1px solid ${isConfirming ? "var(--warn)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -699,28 +730,45 @@ export function TradingView() {
                     <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)" }}>{p.leverage.toFixed(1)}x leverage</span>
                   </div>
                   {isConfirming ? (
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button
-                        className="btn-danger"
-                        style={{ padding: "7px 14px", fontSize: 12 }}
-                        disabled={closing === p.id}
-                        onClick={() => { setConfirmClose(null); closePosition(p.id, p.borrowed); }}
-                      >
-                        {closing === p.id ? "Closing…" : "Confirm Close"}
-                      </button>
-                      <button
-                        style={{ padding: "7px 12px", fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600, background: "transparent", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-2)", cursor: "pointer" }}
-                        onClick={() => setConfirmClose(null)}
-                      >
-                        Cancel
-                      </button>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                      {preview?.loading ? (
+                        <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-3)" }}>Fetching live price…</div>
+                      ) : (
+                        <div style={{ fontFamily: "var(--mono)", fontSize: 11, lineHeight: 1.6, textAlign: "right" }}>
+                          <div style={{ color: "var(--text-2)" }}>
+                            Sell proceeds: <strong style={{ color: "var(--text-1)" }}>${sellProceeds.toFixed(2)}</strong>
+                            {preview?.bestBid != null && <span style={{ color: "var(--text-3)", marginLeft: 4 }}>(bid {preview.bestBid.toFixed(2)})</span>}
+                          </div>
+                          <div style={{ color: "var(--text-2)" }}>Repay vault: <strong style={{ color: "var(--text-1)" }}>−${p.borrowed.toFixed(2)}</strong></div>
+                          <div style={{ color: confirmPnlColor }}>
+                            Net P&amp;L: <strong>{confirmPnl >= 0 ? "+" : ""}${confirmPnl.toFixed(2)}</strong>
+                            {" "}({confirmPnl >= 0 ? "+" : ""}{p.collateral > 0 ? ((confirmPnl / p.collateral) * 100).toFixed(1) : "—"}%)
+                          </div>
+                        </div>
+                      )}
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          className="btn-danger"
+                          style={{ padding: "7px 14px", fontSize: 12 }}
+                          disabled={closing === p.id || preview?.loading}
+                          onClick={() => { setConfirmClose(null); setConfirmClosePreview(null); closePosition(p.id, p.borrowed); }}
+                        >
+                          {closing === p.id ? "Closing…" : "Confirm Close"}
+                        </button>
+                        <button
+                          style={{ padding: "7px 12px", fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600, background: "transparent", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-2)", cursor: "pointer" }}
+                          onClick={() => { setConfirmClose(null); setConfirmClosePreview(null); }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <button
                       className="btn-danger"
                       style={{ padding: "7px 16px", fontSize: 12 }}
                       disabled={closing === p.id}
-                      onClick={() => setConfirmClose(p.id)}
+                      onClick={() => enterConfirmClose(p.id, p.tokenId)}
                     >
                       {closing === p.id ? "Closing…" : "✕ Close Position"}
                     </button>
