@@ -660,8 +660,8 @@ export function TradingView() {
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
                   {[
-                    { label: "Entry Price", value: p.entryPrice > 0 ? `$${p.entryPrice.toFixed(4)}` : "N/A" },
-                    { label: "Exit Price",  value: <span style={{ color: "var(--text-1)", fontWeight: 600 }}>${exitPx.toFixed(4)}</span> },
+                    { label: "Entry Price", value: p.entryPrice > 0 ? `${(p.entryPrice * 100).toFixed(1)}¢` : "N/A" },
+                    { label: "Exit Price",  value: <span style={{ color: "var(--text-1)", fontWeight: 600 }}>{(exitPx * 100).toFixed(1)}¢</span> },
                     { label: "Collateral",  value: `$${p.collateral.toFixed(2)}` },
                     { label: "Size",        value: `$${p.notional.toFixed(2)}` },
                   ].map(({ label, value }) => (
@@ -688,7 +688,7 @@ export function TradingView() {
                   <div style={{ marginTop: 10, background: "rgba(255,180,0,0.07)", border: "1px solid rgba(255,180,0,0.25)", borderRadius: 8, padding: "10px 12px" }}>
                     <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--warn)", fontWeight: 600, marginBottom: 6 }}>Close summary</div>
                     {[
-                      { label: "Sell price (bid)", value: `$${exitPx.toFixed(4)}` },
+                      { label: "Sell price (bid)", value: `${(exitPx * 100).toFixed(1)}¢` },
                       { label: "Est. proceeds",    value: `$${(p.notional * exitPx / (p.entryPrice || 1)).toFixed(2)}` },
                       { label: "Net PnL",          value: `${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%)` },
                     ].map(({ label, value }) => (
@@ -751,7 +751,7 @@ export function TradingView() {
           <div style={{ background: "var(--surface-2)", border: `1px solid ${side === "YES" ? "var(--yes-color)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
             <div className="metric-label" style={{ color: "var(--yes-color)", marginBottom: 6 }}>YES</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 28, fontWeight: 700, color: "var(--yes-color)" }}>
-              {marketLoading ? "—" : `$${yesPrice.toFixed(3)}`}
+              {marketLoading ? "—" : `${(yesPrice * 100).toFixed(1)}¢`}
             </div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", marginTop: 4 }}>Regime falls by June 30</div>
             <MiniChart history={market?.priceHistory ?? []} color="var(--yes-color)" />
@@ -759,7 +759,7 @@ export function TradingView() {
           <div style={{ background: "var(--surface-2)", border: `1px solid ${side === "NO" ? "var(--no-color)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
             <div className="metric-label" style={{ color: "var(--no-color)", marginBottom: 6 }}>NO</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 28, fontWeight: 700, color: "var(--no-color)" }}>
-              {marketLoading ? "—" : `$${noPrice.toFixed(3)}`}
+              {marketLoading ? "—" : `${(noPrice * 100).toFixed(1)}¢`}
             </div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", marginTop: 4 }}>Regime survives until July</div>
             <MiniChart history={(market?.priceHistory ?? []).map((h) => ({ t: h.t, p: 1 - h.p }))} color="var(--no-color)" />
@@ -790,10 +790,10 @@ export function TradingView() {
 
         <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
           <button className={`side-btn side-btn-yes ${side === "YES" ? "active" : ""}`} onClick={() => setSide("YES")}>
-            LONG YES · {yesPrice.toFixed(3)}
+            LONG YES · {(yesPrice * 100).toFixed(1)}¢
           </button>
           <button className={`side-btn side-btn-no ${side === "NO" ? "active" : ""}`} onClick={() => setSide("NO")}>
-            LONG NO · {noPrice.toFixed(3)}
+            LONG NO · {(noPrice * 100).toFixed(1)}¢
           </button>
         </div>
 
@@ -830,7 +830,7 @@ export function TradingView() {
           <div style={{ background: "var(--surface-2)", borderRadius: 10, padding: "12px 14px" }}>
             {[
               { label: "Side",                value: side ? <span className={`tag tag-${side.toLowerCase()}`}>{side}</span> : <span style={{ color: "var(--text-3)" }}>—</span> },
-              { label: "Entry Price",         value: side ? `$${entryPrice.toFixed(4)}` : "—" },
+              { label: "Entry Price",         value: side ? `${(entryPrice * 100).toFixed(1)}¢` : "—" },
               { label: "Collateral",          value: numCollateral > 0 ? `$${numCollateral.toFixed(2)}` : "—" },
               { label: "Borrowed from Vault", value: preview.borrowed > 0 ? <span style={{ color: "var(--warn)" }}>${preview.borrowed.toFixed(2)}</span> : "—" },
               { label: "Total Position Size", value: preview.notional  > 0 ? <span style={{ color: "var(--text-1)", fontWeight: 600 }}>${preview.notional.toFixed(2)}</span> : "—" },
