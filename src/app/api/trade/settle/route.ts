@@ -48,12 +48,13 @@ const ERC20_ABI = [
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json() as {
-      orderId:       string;
-      repayAmount:   number;   // borrowed USDC to pull back to vault
-      walletAddress: string;
+      orderId:          string;
+      repayAmount:      number;   // borrowed USDC to pull back to vault
+      walletAddress:    string;
+      preSellBalance?:  string;   // user's USDC balance before SELL was posted (raw bigint string)
     };
 
-    const { orderId, repayAmount, walletAddress } = body;
+    const { orderId, repayAmount, walletAddress, preSellBalance } = body;
 
     if (!orderId || !repayAmount || repayAmount <= 0 || !walletAddress) {
       return new Response("Missing required fields", { status: 400 });
@@ -82,7 +83,11 @@ export async function POST(req: NextRequest) {
       transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
     });
 
-    // Verify the user's balance is sufficient (SELL should have settled by now)
+    // Verify SELL proceeds have arrived before pulling repayment.
+    // We check that balance increased by at least repayAmount over the pre-SELL baseline,
+    // not just that the absolute balance is sufficient.  Without this check, settle can
+    // fire early from pre-existing USDC — the vault gets paid but the SELL order is still
+    // open, and if the SELL only partially fills the user ends up short-changed.
     const userBal = await publicClient.readContract({
       address:      USDCe_ADDRESS,
       abi:          ERC20_ABI,
@@ -90,9 +95,16 @@ export async function POST(req: NextRequest) {
       args:         [walletAddress as `0x${string}`],
     }) as bigint;
 
-    if (userBal < repayRaw) {
+    // If preSellBalance is provided, require balance >= preSellBalance + repayRaw
+    // (i.e. SELL added at least repayAmount to the wallet).
+    // Fall back to the old absolute check when preSellBalance is absent.
+    const preSellRaw = preSellBalance ? BigInt(preSellBalance) : 0n;
+    const requiredBal = preSellRaw + repayRaw;
+
+    if (userBal < requiredBal) {
+      const needed = Number(requiredBal - (preSellRaw > 0n ? preSellRaw : 0n)) / 1e6;
       return new Response(
-        `SELL proceeds not yet available — user balance $${(Number(userBal) / 1e6).toFixed(2)} < repay $${repayAmount.toFixed(2)}. Try again in a few seconds.`,
+        `SELL proceeds not yet fully settled — balance $${(Number(userBal) / 1e6).toFixed(2)}, need $${(Number(requiredBal) / 1e6).toFixed(2)} (pre-SELL $${(Number(preSellRaw) / 1e6).toFixed(2)} + repay $${needed.toFixed(2)}). Waiting for SELL to fill…`,
         { status: 409 },
       );
     }

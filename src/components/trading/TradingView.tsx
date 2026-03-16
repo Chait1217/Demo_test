@@ -537,9 +537,10 @@ export function TradingView() {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
             body:    JSON.stringify({
-              orderId:       positionId,
-              repayAmount:   closeJson.repayAmount,
-              walletAddress: address,
+              orderId:          positionId,
+              repayAmount:      closeJson.repayAmount,
+              walletAddress:    address,
+              preSellBalance:   closeJson.preSellBalance,
             }),
           });
           if (settleRes.ok) {

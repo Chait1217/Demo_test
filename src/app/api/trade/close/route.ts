@@ -6,6 +6,14 @@ import { repayToVault } from "@/server/vaultState";
 import { POLYGON_CHAIN, USDCe_ADDRESS, VAULT_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
 import { leveragedVaultAbi } from "@/lib/vaultAbi";
 
+const ERC20_BALANCE_ABI = [
+  {
+    name: "balanceOf", type: "function", stateMutability: "view",
+    inputs:  [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
 const publicClient = createPublicClient({
   chain:     POLYGON_CHAIN,
   transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com", {
@@ -180,6 +188,7 @@ export async function POST(req: NextRequest) {
     // in the position tokens — pulling repayment before SELL proceeds arrive drains
     // the wallet by the full notional (e.g. -3 for 1.5 collateral + 2x leverage).
     let isSellPath = false;
+    let preSellBalance = "0"; // USDC balance before SELL is posted — used by settle to verify proceeds arrived
 
     if (!isSimulated && walletAddress && l1Signature && l1Timestamp != null) {
       const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce ?? 0);
@@ -192,6 +201,21 @@ export async function POST(req: NextRequest) {
 
       if (!cancelled) {
         if (sellOrderStruct && sellOrderSignature) {
+          // Read the user's USDC balance BEFORE posting the SELL.
+          // This baseline lets settle require balance > preSellBalance + repayAmount,
+          // proving SELL proceeds actually arrived before vault repayment runs.
+          // Without this, settle fires early from pre-existing USDC (the partial-fill bug).
+          try {
+            const bal = await publicClient.readContract({
+              address:      USDCe_ADDRESS as `0x${string}`,
+              abi:          ERC20_BALANCE_ABI,
+              functionName: "balanceOf",
+              args:         [walletAddress as `0x${string}`],
+            }) as bigint;
+            preSellBalance = bal.toString();
+            console.log(`[close] pre-SELL balance: $${(Number(bal) / 1e6).toFixed(2)} USDC`);
+          } catch { /* non-fatal — settle will fall back to absolute balance check */ }
+
           // Order was filled (or this is a balance-recovery) — post a SELL to recover USDC
           const sellWithSig = { ...sellOrderStruct, signature: sellOrderSignature };
           const sellResp = await postSellOrder(walletAddress, creds, sellWithSig);
@@ -289,8 +313,9 @@ export async function POST(req: NextRequest) {
       orderId,
       closeTxHash,
       // repayPending=true tells the client to call /api/trade/settle after SELL fills
-      repayPending: isSellPath && !!repayAmount && repayAmount > 0,
-      repayAmount:  isSellPath ? repayAmount : undefined,
+      repayPending:     isSellPath && !!repayAmount && repayAmount > 0,
+      repayAmount:      isSellPath ? repayAmount : undefined,
+      preSellBalance:   isSellPath ? preSellBalance : undefined,
     });
   } catch (err: any) {
     console.error("[close] error:", err);
