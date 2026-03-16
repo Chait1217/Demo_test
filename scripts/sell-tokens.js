@@ -265,19 +265,33 @@ async function main() {
 
   const ctf = new ethers.Contract(CTF_TOKEN_ADDR, ERC1155_ABI, wallet);
 
-  // Collect token IDs to check: CLI arg + KNOWN_TOKEN_IDS env var
+  // Collect token IDs: CLI arg → KNOWN_TOKEN_IDS env var → local /api/market auto-discovery
   const cliTokenId = process.argv[2];
   let tokenIds = [];
   if (cliTokenId) tokenIds.push(cliTokenId.trim());
   if (KNOWN_TOKEN_IDS.length) tokenIds.push(...KNOWN_TOKEN_IDS);
 
   if (tokenIds.length === 0) {
+    // Try to auto-discover from the running local Next.js app
+    const appPort = process.env.APP_PORT ?? "3000";
+    try {
+      console.log(`\nNo tokenId supplied — querying local app at http://localhost:${appPort}/api/market …`);
+      const mRes = await fetch(`http://localhost:${appPort}/api/market`, { signal: AbortSignal.timeout(5_000) });
+      if (mRes.ok) {
+        const mData = await mRes.json();
+        if (mData.yesTokenId) tokenIds.push(mData.yesTokenId);
+        if (mData.noTokenId)  tokenIds.push(mData.noTokenId);
+        console.log(`  Found tokenIds from market API: ${tokenIds.join(", ")}`);
+      }
+    } catch { /* app not running or network error — fall through */ }
+  }
+
+  if (tokenIds.length === 0) {
     console.error(
-      "\n❌  No token ID provided.\n" +
+      "\n❌  No token ID found.\n" +
       "    Usage: node scripts/sell-tokens.js <tokenId>\n" +
-      "    Or set KNOWN_TOKEN_IDS=<id1>,<id2> in .env.local\n" +
-      "\n    Find your tokenId in the browser:\n" +
-      "    localStorage → levmarket_positions → find state=CLOSED entry → copy tokenId"
+      "    Or start the app (npm run dev) so the script can auto-discover IDs.\n" +
+      "    Or set KNOWN_TOKEN_IDS=<id1>,<id2> in .env.local"
     );
     process.exit(1);
   }
