@@ -348,11 +348,22 @@ export function TradingView() {
             await publicClient!.waitForTransactionReceipt({ hash: approveTx });
           }
           const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-          // SELL order price must be the bid (mid − spread/2), not the mid.
-          // The CLOB enforces 0.01 tick size on price = takerAmount/makerAmount.
-          const posMidSell = pos.side === "YES" ? yesPrice : noPrice;
-          const bidPrice   = Math.max(posMidSell - spread / 2, 0.01);
-          const tickPrice  = Math.max(Math.round(bidPrice * 100) / 100, 0.01);
+          // Fetch real-time best bid from CLOB for guaranteed immediate fill.
+          // Falls back to mid − spread/2 if the order book is unreachable.
+          let tickPrice: number;
+          try {
+            const bookRes = await fetch(
+              `https://clob.polymarket.com/book?token_id=${pos.tokenId}`,
+              { signal: AbortSignal.timeout(5_000) },
+            );
+            const book = bookRes.ok ? await bookRes.json() as { bids?: { price: string }[] } : { bids: [] };
+            const bids    = (book.bids ?? []) as { price: string }[];
+            const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : 0;
+            tickPrice = Math.max(Math.round(bestBid * 100) / 100, 0.01);
+          } catch {
+            const posMidSell = pos.side === "YES" ? yesPrice : noPrice;
+            tickPrice = Math.max(Math.round(Math.max(posMidSell - spread / 2, 0.01) * 100) / 100, 0.01);
+          }
 
           // Read the exact on-chain balance so we never try to sell more than we hold.
           // makerAmount must be a multiple of 10_000 (max 2 dp in token units) → floor, not round.
