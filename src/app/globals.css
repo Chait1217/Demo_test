@@ -208,6 +208,17 @@ body {
 .btn-danger:hover { filter: brightness(1.1); }
 .btn-danger:active { transform: scale(0.98); }
 
+.btn-warn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 8px; border-radius: 10px; background: #ffb400;
+  padding: 10px 20px; font-family: var(--mono); font-size: 13px;
+  font-weight: 600; color: #000; transition: all 150ms ease;
+  cursor: pointer; border: none;
+}
+.btn-warn:hover { filter: brightness(1.1); }
+.btn-warn:active { transform: scale(0.98); }
+.btn-warn:disabled { opacity: 0.5; cursor: default; }
+
 /* Input */
 .input {
   width: 100%;

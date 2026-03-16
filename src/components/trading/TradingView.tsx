@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAccount, useChainId, useSwitchChain, useSignTypedData, usePublicClient, useWriteContract } from "wagmi";
 import { polygon } from "wagmi/chains";
 import { useMarket } from "@/hooks/useMarket";
@@ -88,6 +88,10 @@ export function TradingView() {
   const [syncing, setSyncing]       = useState(false);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
+  const [orphanedTokens, setOrphanedTokens] = useState<
+    { positionId: string; tokenId: string; balance: bigint; exchangeAddress: string; side: string }[]
+  >([]);
+  const [sellingOrphan, setSellingOrphan] = useState<string | null>(null);
 
   const numCollateral = parseFloat(collateral) || 0;
   const utilization   = snapshot?.utilization ?? 0;
@@ -101,7 +105,38 @@ export function TradingView() {
   const exitMid    = (side === "YES" ? yesPrice : noPrice);
   const exitBid    = Math.max(exitMid - spread / 2, 0.001);
 
-  const openPositions = (positions ?? []).filter((p) => p.state === "OPEN");
+  const openPositions   = (positions ?? []).filter((p) => p.state === "OPEN");
+  const closedWithToken = (positions ?? []).filter(
+    (p) => p.state === "CLOSED" && p.tokenId && p.exchangeAddress,
+  );
+
+  // Scan closed positions for leftover CTF tokens (e.g. from a partial SELL that didn't fully fill)
+  useEffect(() => {
+    if (!publicClient || !address || closedWithToken.length === 0) {
+      setOrphanedTokens([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const found: typeof orphanedTokens = [];
+      for (const p of closedWithToken) {
+        try {
+          const bal = await publicClient.readContract({
+            address:      CTF_TOKEN_ADDRESS,
+            abi:          ERC1155_APPROVAL_ABI,
+            functionName: "balanceOf",
+            args:         [address as `0x${string}`, BigInt(p.tokenId!)],
+          }) as bigint;
+          if (bal > 0n) {
+            found.push({ positionId: p.id, tokenId: p.tokenId!, balance: bal, exchangeAddress: p.exchangeAddress!, side: p.side });
+          }
+        } catch { /* ignore RPC errors for individual positions */ }
+      }
+      if (!cancelled) setOrphanedTokens(found);
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address, closedWithToken.length, publicClient]);
 
   const walletBalanceNum      = rawBalance ?? 0;
   const insufficientBalance   = numCollateral > 0 && numCollateral > walletBalanceNum;
@@ -331,6 +366,130 @@ export function TradingView() {
       }
     } else {
       setConfirmClosePreview({ id: positionId, bestBid: null, loading: false });
+    }
+  }
+
+  async function sellOrphanedTokens(positionId: string) {
+    const orphan = orphanedTokens.find((o) => o.positionId === positionId);
+    if (!orphan) return;
+    setSellingOrphan(positionId); setError(""); setSuccess("");
+    try {
+      // ── L1 auth signature ────────────────────────────────────────────────
+      setSubmitStep("Sign auth (wallet popup)…");
+      const l1Ts = Math.floor(Date.now() / 1000);
+      const l1Signature = await signTypedDataAsync({
+        domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
+        types:  { ClobAuth: [{ name: "address", type: "address" }, { name: "timestamp", type: "uint256" }] },
+        primaryType: "ClobAuth",
+        message: { address: address as `0x${string}`, timestamp: BigInt(l1Ts) },
+      });
+
+      // ── ERC-1155 approval ────────────────────────────────────────────────
+      setSubmitStep("Checking token approval…");
+      const isApproved = await publicClient!.readContract({
+        address:      CTF_TOKEN_ADDRESS,
+        abi:          ERC1155_APPROVAL_ABI,
+        functionName: "isApprovedForAll",
+        args:         [address as `0x${string}`, orphan.exchangeAddress as `0x${string}`],
+      });
+      if (!isApproved) {
+        setSubmitStep("Approve exchange to transfer tokens (wallet popup)…");
+        const tx = await writeContractAsync({
+          address: CTF_TOKEN_ADDRESS,
+          abi: ERC1155_APPROVAL_ABI,
+          functionName: "setApprovalForAll",
+          args: [orphan.exchangeAddress as `0x${string}`, true],
+        });
+        await publicClient!.waitForTransactionReceipt({ hash: tx });
+      }
+
+      // ── Sweep the book & build SELL order ────────────────────────────────
+      setSubmitStep("Fetching live prices…");
+      const makerAmountRaw = (BigInt(Math.floor(Number(orphan.balance) / 10_000)) * 10_000n).toString();
+      const tokensToSell   = Number(makerAmountRaw) / 1_000_000;
+
+      let tickPrice: number;
+      try {
+        const bookRes = await fetch(
+          `https://clob.polymarket.com/book?token_id=${orphan.tokenId}`,
+          { signal: AbortSignal.timeout(5_000) },
+        );
+        const book = bookRes.ok
+          ? await bookRes.json() as { bids?: { price: string; size: string }[] }
+          : { bids: [] };
+        const bids = (book.bids ?? []) as { price: string; size: string }[];
+        if (bids.length === 0) throw new Error("No bids — market has no buyers right now. Try again shortly.");
+        let cumulative = 0;
+        let sweepPrice = parseFloat(bids[bids.length - 1].price);
+        for (const bid of bids) {
+          cumulative += parseFloat(bid.size ?? "0");
+          if (cumulative >= tokensToSell) { sweepPrice = parseFloat(bid.price); break; }
+        }
+        tickPrice = Math.max(Math.round(sweepPrice * 100) / 100, 0.01);
+      } catch (e: any) { throw e; }
+
+      const takerAmountRaw = (Math.floor(tokensToSell * tickPrice * 1_000_000 / 100) * 100).toString();
+      const ZERO_ADDRESS   = "0x0000000000000000000000000000000000000000";
+      const sellStruct = {
+        salt: Math.round(Math.random() * Date.now()).toString(),
+        maker: address, signer: address, taker: ZERO_ADDRESS,
+        tokenId: orphan.tokenId,
+        makerAmount: makerAmountRaw, takerAmount: takerAmountRaw,
+        expiration: "0", nonce: "0", feeRateBps: "0",
+        side: 1, signatureType: 0,
+      };
+
+      setSubmitStep("Sign SELL order (wallet popup)…");
+      const sellSig = await signTypedDataAsync({
+        domain: {
+          name: "Polymarket CTF Exchange", version: "1",
+          chainId: polygon.id,
+          verifyingContract: orphan.exchangeAddress as `0x${string}`,
+        },
+        types: { Order: [
+          { name: "salt", type: "uint256" }, { name: "maker", type: "address" },
+          { name: "signer", type: "address" }, { name: "taker", type: "address" },
+          { name: "tokenId", type: "uint256" }, { name: "makerAmount", type: "uint256" },
+          { name: "takerAmount", type: "uint256" }, { name: "expiration", type: "uint256" },
+          { name: "nonce", type: "uint256" }, { name: "feeRateBps", type: "uint256" },
+          { name: "side", type: "uint8" }, { name: "signatureType", type: "uint8" },
+        ]},
+        primaryType: "Order",
+        message: {
+          salt: BigInt(sellStruct.salt), maker: sellStruct.maker as `0x${string}`,
+          signer: sellStruct.signer as `0x${string}`, taker: sellStruct.taker as `0x${string}`,
+          tokenId: BigInt(sellStruct.tokenId), makerAmount: BigInt(sellStruct.makerAmount),
+          takerAmount: BigInt(sellStruct.takerAmount), expiration: BigInt(sellStruct.expiration),
+          nonce: BigInt(sellStruct.nonce), feeRateBps: BigInt(sellStruct.feeRateBps),
+          side: sellStruct.side as number, signatureType: sellStruct.signatureType as number,
+        },
+      });
+
+      // ── Post SELL via close route (repayAmount=0 — vault already repaid) ─
+      setSubmitStep("Posting SELL order…");
+      const closeRes = await fetch("/api/trade/close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId:           positionId,
+          repayAmount:       0,
+          walletAddress:     address,
+          l1Signature,
+          l1Timestamp:       l1Ts,
+          l1Nonce:           0,
+          sellOrderStruct:   sellStruct,
+          sellOrderSignature: sellSig,
+        }),
+      });
+      if (!closeRes.ok) throw new Error(`SELL failed (${closeRes.status}): ${await closeRes.text()}`);
+
+      setOrphanedTokens((prev) => prev.filter((o) => o.positionId !== positionId));
+      setSuccess(`SELL order submitted — ~${(tokensToSell * tickPrice).toFixed(2)} USDC will arrive in your wallet shortly.`);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setSellingOrphan(null);
+      setSubmitStep("");
     }
   }
 
@@ -864,6 +1023,36 @@ export function TradingView() {
                   </span>
                 </div>
               </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── Orphaned tokens: sold position but tokens remain in wallet ─── */}
+        {isConnected && orphanedTokens.length > 0 && (
+          <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--warn)", fontWeight: 700, letterSpacing: "0.05em", paddingTop: 4 }}>
+              UNSOLD TOKENS DETECTED
+            </div>
+            {orphanedTokens.map((o) => {
+              const tokensHeld = Number(o.balance) / 1_000_000;
+              const isSelling  = sellingOrphan === o.positionId;
+              return (
+                <div key={o.positionId} style={{ background: "rgba(255,180,0,0.06)", border: "1px solid rgba(255,180,0,0.3)", borderRadius: 10, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)", lineHeight: 1.5 }}>
+                    <span className={`tag tag-${o.side.toLowerCase()}`} style={{ marginRight: 8 }}>{o.side}</span>
+                    <strong style={{ color: "var(--text-1)" }}>{tokensHeld.toFixed(4)} tokens</strong>
+                    {" "}still in wallet from a previous close — sell now to recover USDC.
+                  </div>
+                  <button
+                    className="btn-warn"
+                    style={{ padding: "7px 16px", fontSize: 12, whiteSpace: "nowrap", flexShrink: 0 }}
+                    disabled={isSelling}
+                    onClick={() => sellOrphanedTokens(o.positionId)}
+                  >
+                    {isSelling ? (submitStep || "Selling…") : "Sell Now"}
+                  </button>
+                </div>
               );
             })}
           </div>
