@@ -86,8 +86,8 @@ export function TransactionsView() {
                 <th>Borrowed</th>
                 <th>Size</th>
                 <th>Leverage</th>
-                <th>Fees</th>
-                <th>Order ID</th>
+                <th>Open Fee</th>
+                <th>Tx Hash</th>
               </tr>
             </thead>
             <tbody>
@@ -109,11 +109,23 @@ export function TransactionsView() {
                   <td style={{ color: "var(--warn)" }}>${p.borrowed.toFixed(2)}</td>
                   <td style={{ color: "var(--text-1)", fontWeight: 600 }}>${p.notional.toFixed(2)}</td>
                   <td style={{ color: "var(--accent)" }}>{p.leverage.toFixed(1)}x</td>
-                  <td>${(p.fees.openFee + p.fees.closeFee).toFixed(4)}</td>
+                  <td>${p.fees.openFee.toFixed(4)}</td>
                   <td>
-                    <span style={{ color: "var(--text-3)", fontSize: 10 }}>
-                      {p.id.length > 12 ? `${p.id.slice(0, 8)}…${p.id.slice(-4)}` : p.id}
-                    </span>
+                    {p.txHash ? (
+                      <a
+                        href={`https://polygonscan.com/tx/${p.txHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--accent)", textDecoration: "none" }}
+                        title={p.txHash}
+                      >
+                        {p.txHash.slice(0, 8)}…{p.txHash.slice(-4)}
+                      </a>
+                    ) : (
+                      <span style={{ color: "var(--text-3)", fontSize: 10 }} title={p.id}>
+                        {p.id.length > 12 ? `${p.id.slice(0, 8)}…${p.id.slice(-4)}` : p.id}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}

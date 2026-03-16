@@ -45,11 +45,11 @@ export function computePositionPreview(
   const borrowed = Math.max(notional - collateral, 0);
 
   const openFee = notional * 0.004;
-  const closeFee = notional * 0.004;
+  const closeFee = 0; // No close fee — only open fee of 0.4%
   const liquidationFee = collateral * 0.05;
   const borrowApr = borrowAprFromUtilization(utilization);
 
-  const totalFees = openFee + closeFee;
+  const totalFees = openFee;
   const vaultShare = totalFees * 0.5;
   const insuranceShare = totalFees * 0.3;
   const treasuryShare = totalFees * 0.2;

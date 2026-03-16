@@ -232,9 +232,9 @@ export async function POST(req: NextRequest) {
 
         console.log(`[submit] vault borrow + forward: $${preview.borrowed.toFixed(2)} USDC → ${walletAddress}`);
       } catch (e: any) {
-        console.warn("[submit] vault borrow failed (non-fatal):", e.message);
-        // Non-fatal: the notional-sized order will likely be rejected by Polymarket
-        // if the user doesn't have enough USDC, surfacing a clear error.
+        // Fatal: if borrow fails the user won't have enough USDC for the notional-sized
+        // order, and we must NOT record the position or ask for repayment later.
+        throw new Error(`Vault borrow failed: ${e.message}. Check vault liquidity and marginEngine config.`);
       }
     }
 
