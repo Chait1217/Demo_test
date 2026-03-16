@@ -92,7 +92,11 @@ export function TradingView() {
 
   const yesPrice   = market?.yesPrice ?? 0.5;
   const noPrice    = market?.noPrice  ?? 0.5;
-  const entryPrice = side === "YES" ? yesPrice : noPrice;
+  const spread     = market?.spread   ?? 0;
+  // Entry = ask (what you pay when buying); Exit = bid (what you receive when selling)
+  const entryPrice = (side === "YES" ? yesPrice : noPrice) + spread / 2;
+  const exitMid    = (side === "YES" ? yesPrice : noPrice);
+  const exitBid    = Math.max(exitMid - spread / 2, 0.001);
 
   const openPositions = (positions ?? []).filter((p) => p.state === "OPEN");
 
@@ -138,6 +142,7 @@ export function TradingView() {
       setSubmitStep("Checking USDC.e allowance…");
       const needed = BigInt(orderStruct.makerAmount as string);
       const MAX_UINT256 = BigInt("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+      let openTxHash: string | undefined;
 
       for (const spender of [CTF_EXCHANGE_ADDRESS, NEG_RISK_EXCHANGE_ADDRESS]) {
         const currentAllowance = await publicClient!.readContract({
@@ -155,6 +160,7 @@ export function TradingView() {
             functionName: "approve",
             args:         [spender, MAX_UINT256],
           });
+          openTxHash = approveTx; // Real on-chain tx hash
           setSubmitStep("Waiting for approval confirmation…");
           await publicClient!.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
         }
@@ -262,11 +268,12 @@ export function TradingView() {
         leverage,
         fees: {
           openFee:        json.preview?.fees?.openFee        ?? preview.fees.openFee,
-          closeFee:       json.preview?.fees?.closeFee       ?? preview.fees.closeFee,
+          closeFee:       0,
           liquidationFee: json.preview?.fees?.liquidationFee ?? preview.fees.liquidationFee,
         },
         state:    "OPEN",
         openedAt: new Date().toISOString(),
+        txHash:   openTxHash, // Real Polygon tx hash (approve tx) if a new approval was needed
         // Store fields needed to SELL tokens back when closing a filled position
         tokenId:         orderStruct.tokenId as string,
         tokenCount:      Number(BigInt(orderStruct.takerAmount as string)) / 1e6,
@@ -339,9 +346,11 @@ export function TradingView() {
             await publicClient!.waitForTransactionReceipt({ hash: approveTx });
           }
           const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-          const currentPrice = pos.side === "YES" ? yesPrice : noPrice;
-          // Round to 0.01 tick size — same rule the CLOB enforces on price = takerAmount/makerAmount
-          const tickPrice = Math.round(currentPrice * 100) / 100 || 0.01;
+          // SELL order price must be the bid (mid − spread/2), not the mid.
+          // The CLOB enforces 0.01 tick size on price = takerAmount/makerAmount.
+          const posMidSell = pos.side === "YES" ? yesPrice : noPrice;
+          const bidPrice   = Math.max(posMidSell - spread / 2, 0.01);
+          const tickPrice  = Math.max(Math.round(bidPrice * 100) / 100, 0.01);
 
           // Read the exact on-chain balance so we never try to sell more than we hold.
           // makerAmount must be a multiple of 10_000 (max 2 dp in token units) → floor, not round.
@@ -606,9 +615,11 @@ export function TradingView() {
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {openPositions.map((p) => {
-              const exitPx    = p.side === "YES" ? yesPrice : noPrice;
+              // Sell at bid (mid − spread/2); buy was at ask (mid + spread/2)
+              const posMid    = p.side === "YES" ? yesPrice : noPrice;
+              const exitPx    = Math.max(posMid - spread / 2, 0.001);
               const grossPnl  = p.entryPrice > 0 ? p.notional * (exitPx / p.entryPrice - 1) : 0;
-              const netPnl    = grossPnl - (p.fees?.closeFee ?? 0);
+              const netPnl    = grossPnl; // No close fee
               const pnlPct    = p.collateral > 0 ? (netPnl / p.collateral) * 100 : 0;
               const pnlColor  = netPnl >= 0 ? "var(--yes-color)" : "var(--danger)";
               const isConfirming = confirmClose === p.id;
@@ -678,10 +689,9 @@ export function TradingView() {
                   <div style={{ marginTop: 10, background: "rgba(255,180,0,0.07)", border: "1px solid rgba(255,180,0,0.25)", borderRadius: 8, padding: "10px 12px" }}>
                     <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--warn)", fontWeight: 600, marginBottom: 6 }}>Close summary</div>
                     {[
-                      { label: "Exit at",        value: `$${exitPx.toFixed(4)}` },
-                      { label: "Est. proceeds",  value: `$${(p.notional * exitPx / (p.entryPrice || 1)).toFixed(2)}` },
-                      { label: "Close fee",      value: `-$${(p.fees?.closeFee ?? 0).toFixed(4)}` },
-                      { label: "Net PnL",        value: `${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%)` },
+                      { label: "Sell price (bid)", value: `$${exitPx.toFixed(4)}` },
+                      { label: "Est. proceeds",    value: `$${(p.notional * exitPx / (p.entryPrice || 1)).toFixed(2)}` },
+                      { label: "Net PnL",          value: `${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%)` },
                     ].map(({ label, value }) => (
                       <div key={label} className="summary-row">
                         <span className="summary-label">{label}</span>
@@ -833,9 +843,8 @@ export function TradingView() {
             ))}
             <div className="row-divider" style={{ margin: "10px 0" }} />
             {[
-              { label: "Open Fee (0.4%)",       value: preview.notional > 0 ? `$${preview.fees.openFee.toFixed(4)}` : "—" },
-              { label: "Est. Close Fee (0.4%)", value: preview.notional > 0 ? `$${preview.fees.closeFee.toFixed(4)}` : "—" },
-              { label: "Borrow APR",            value: `${(preview.fees.borrowApr * 100).toFixed(1)}%` },
+              { label: "Open Fee (0.4%)", value: preview.notional > 0 ? `$${preview.fees.openFee.toFixed(4)}` : "—" },
+              { label: "Borrow APR",      value: `${(preview.fees.borrowApr * 100).toFixed(1)}%` },
             ].map(({ label, value }) => (
               <div key={label} className="summary-row">
                 <span className="summary-label">{label}</span>
