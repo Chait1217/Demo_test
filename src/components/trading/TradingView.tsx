@@ -119,7 +119,10 @@ export function TradingView() {
     let cancelled = false;
     (async () => {
       const found: typeof orphanedTokens = [];
+      const seenTokenIds = new Set<string>();
       for (const p of closedWithToken) {
+        if (seenTokenIds.has(p.tokenId!)) continue; // same token across multiple closed positions
+        seenTokenIds.add(p.tokenId!);
         try {
           const bal = await publicClient.readContract({
             address:      CTF_TOKEN_ADDRESS,
@@ -719,17 +722,43 @@ export function TradingView() {
       }
 
       if (closeJson.repayPending && closeJson.repayAmount > 0) {
-        // SELL path — SELL proceeds are in-flight. Wait ~10s for settlement,
-        // then pull the borrowed repayment. This prevents the -3 wallet drain
-        // that would occur if we pulled before the 3 USDC proceeds arrived.
-        setSuccess("SELL order submitted — awaiting settlement (~10s)…");
-        await new Promise(r => setTimeout(r, 10_000));
+        // SELL path — SELL proceeds are in-flight.
+        // Poll until the SELL order fills (up to 90s), then call settle.
+        // The server background task auto-reposts at floor after 30s, so we
+        // just need to keep trying settle until USDC arrives.
+        setSuccess("SELL order submitted — waiting for fill…");
+
+        // First: poll CLOB directly if we got a sellOrderId (gives accurate fill time)
+        const sellOrderId: string | undefined = closeJson.sellOrderId;
+        if (sellOrderId) {
+          setSubmitStep("Waiting for SELL to fill…");
+          const fillDeadline = Date.now() + 90_000;
+          let fillConfirmed = false;
+          while (Date.now() < fillDeadline && !fillConfirmed) {
+            await new Promise(r => setTimeout(r, 5_000));
+            try {
+              const statusRes = await fetch(`/api/trade/orders?orderId=${encodeURIComponent(sellOrderId)}&walletAddress=${encodeURIComponent(address!)}&l1Signature=${encodeURIComponent(closeJson.preSellBalance ?? "")}`);
+              // orders route needs auth; fallback: just keep going to settle
+              if (statusRes.ok) {
+                const data = await statusRes.json() as { status?: string; sizeRemaining?: string };
+                const s = (data.status ?? "").toUpperCase();
+                if (s === "MATCHED" || s === "FILLED" || parseFloat(data.sizeRemaining ?? "1") === 0) {
+                  fillConfirmed = true;
+                }
+              }
+            } catch { /* ignore — fall through to settle retries */ }
+          }
+        } else {
+          // No sell order ID: wait a flat 15s then proceed to settle retries
+          await new Promise(r => setTimeout(r, 15_000));
+        }
+
         setSubmitStep("Settling repayment…");
 
-        // Retry up to 3 times in case the SELL settles slightly late
+        // Retry settle up to 12 times (8s apart = up to 96s total)
         let settled = false;
         let settleError = "";
-        for (let attempt = 0; attempt < 3 && !settled; attempt++) {
+        for (let attempt = 0; attempt < 12 && !settled; attempt++) {
           const settleRes = await fetch("/api/trade/settle", {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
@@ -747,10 +776,10 @@ export function TradingView() {
             }
             settled = true;
           } else if (settleRes.status === 409) {
-            // Proceeds not yet available — wait another 5s and retry
-            await new Promise(r => setTimeout(r, 5_000));
+            // Proceeds not yet available — wait 8s and retry
+            if (attempt === 0) setSuccess("Waiting for SELL proceeds to arrive…");
+            await new Promise(r => setTimeout(r, 8_000));
           } else {
-            // Server error — record it and stop retrying
             settleError = await settleRes.text();
             console.error("[close] settle failed:", settleError);
             break;

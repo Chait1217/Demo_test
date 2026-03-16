@@ -114,6 +114,103 @@ async function cancelOrder(
 
 // ── Post a signed SELL order to recover USDC from a filled position ──────────
 
+// ── Poll a single order for fill status ───────────────────────────────────────
+
+async function pollOrderFilled(
+  walletAddress: string,
+  creds: { key: string; secret: string; passphrase: string },
+  orderId: string,
+  timeoutMs = 45_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 4_000));
+    try {
+      const ts   = String(Math.floor(Date.now() / 1000));
+      const hmac = await buildHmacSig(creds.secret, ts, "GET", `/order/${orderId}`);
+      const res  = await fetch(`${POLYMARKET_API_HOST}/order/${orderId}`, {
+        headers: {
+          POLY_ADDRESS:    walletAddress,
+          POLY_SIGNATURE:  hmac,
+          POLY_TIMESTAMP:  ts,
+          POLY_API_KEY:    creds.key,
+          POLY_PASSPHRASE: creds.passphrase,
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!res.ok) continue;
+      const o = await res.json() as Record<string, unknown>;
+      const status    = String(o.status ?? "").toUpperCase();
+      const remaining = parseFloat(String(o.size_remaining ?? o.sizeRemaining ?? "0"));
+      if (status === "MATCHED" || status === "FILLED" || remaining === 0) return true;
+      if (status === "CANCELLED") return false;
+    } catch { /* retry */ }
+  }
+  return false;
+}
+
+// ── Repost SELL at floor bid, signed server-side with the server private key ──
+
+async function repostAtFloor(
+  walletAddress: string,
+  creds: { key: string; secret: string; passphrase: string },
+  sellOrderWithSig: Record<string, unknown>,
+): Promise<{ orderId?: string; orderID?: string; status?: string }> {
+  const serverPk = process.env.POLYMARKET_PRIVATE_KEY ?? process.env.USER_PRIVATE_KEY;
+  if (!serverPk) throw new Error("No server private key available to repost");
+
+  const tokenId    = String(sellOrderWithSig.tokenId);
+  const makerUnits = Number(sellOrderWithSig.makerAmount) / 1_000_000;
+  const exchangeAddr = String(sellOrderWithSig.exchangeAddress ?? sellOrderWithSig.verifyingContract ?? "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E");
+
+  // Fetch live floor bid
+  const bookRes = await fetch(`${POLYMARKET_API_HOST}/book?token_id=${tokenId}`, { signal: AbortSignal.timeout(5_000) });
+  const book    = bookRes.ok ? await bookRes.json() as { bids?: { price: string; size: string }[] } : { bids: [] };
+  const bids    = (book.bids ?? []).map((b) => ({ price: parseFloat(b.price), size: parseFloat(b.size ?? "0") }));
+  if (bids.length === 0) throw new Error("Still no bids after cancel — market has no buyers");
+
+  let cum = 0, sweepPx = bids[bids.length - 1].price;
+  for (const b of bids) { cum += b.size; if (cum >= makerUnits) { sweepPx = b.price; break; } }
+  const floorPx     = Math.max(Math.round(sweepPx * 100) / 100, 0.01);
+  const makerAmtRaw = String(Math.floor(makerUnits * 1e6 / 10_000) * 10_000);
+  const takerAmtRaw = String(Math.floor(makerUnits * floorPx * 1_000_000 / 100) * 100);
+
+  console.log(`[close] reposting SELL at floor bid ${floorPx} (~$${(makerUnits * floorPx).toFixed(2)} USDC)`);
+
+  const account    = privateKeyToAccount(serverPk as `0x${string}`);
+  const ZERO       = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+  const salt       = String(Math.round(Math.random() * Date.now()));
+
+  // Sign with viem
+  const { hashTypedData } = await import("viem");
+  const domain = { name: "Polymarket CTF Exchange", version: "1", chainId: 137, verifyingContract: exchangeAddr as `0x${string}` };
+  const types  = { Order: [
+    { name: "salt",          type: "uint256" }, { name: "maker",         type: "address" },
+    { name: "signer",        type: "address" }, { name: "taker",         type: "address" },
+    { name: "tokenId",       type: "uint256" }, { name: "makerAmount",   type: "uint256" },
+    { name: "takerAmount",   type: "uint256" }, { name: "expiration",    type: "uint256" },
+    { name: "nonce",         type: "uint256" }, { name: "feeRateBps",    type: "uint256" },
+    { name: "side",          type: "uint8"   }, { name: "signatureType", type: "uint8"   },
+  ] as const };
+  const msgValue = {
+    salt: BigInt(salt), maker: account.address, signer: account.address, taker: ZERO,
+    tokenId: BigInt(tokenId), makerAmount: BigInt(makerAmtRaw), takerAmount: BigInt(takerAmtRaw),
+    expiration: 0n, nonce: 0n, feeRateBps: 0n, side: 1, signatureType: 0,
+  };
+  const hash = hashTypedData({ domain, types, primaryType: "Order", message: msgValue });
+  const { sign } = await import("viem/accounts");
+  const sig  = await sign({ hash, privateKey: serverPk as `0x${string}` });
+  const vHex = (sig.v ?? 27n).toString(16).padStart(2, "0");
+  const signature = sig.r + sig.s.slice(2) + vHex;
+
+  const newOrder = {
+    salt, maker: account.address, signer: account.address, taker: ZERO,
+    tokenId, makerAmount: makerAmtRaw, takerAmount: takerAmtRaw,
+    expiration: "0", nonce: "0", feeRateBps: "0", side: 1, signatureType: 0, signature,
+  };
+  return postSellOrder(account.address, creds, newOrder);
+}
+
 async function postSellOrder(
   walletAddress: string,
   creds: { key: string; secret: string; passphrase: string },
@@ -189,6 +286,7 @@ export async function POST(req: NextRequest) {
     // the wallet by the full notional (e.g. -3 for 1.5 collateral + 2x leverage).
     let isSellPath = false;
     let preSellBalance = "0"; // USDC balance before SELL is posted — used by settle to verify proceeds arrived
+    let sellOrderId: string | undefined;
 
     if (!isSimulated && walletAddress && l1Signature && l1Timestamp != null) {
       const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce ?? 0);
@@ -220,7 +318,28 @@ export async function POST(req: NextRequest) {
           const sellWithSig = { ...sellOrderStruct, signature: sellOrderSignature };
           const sellResp = await postSellOrder(walletAddress, creds, sellWithSig);
           console.log("[close] SELL order posted:", sellResp);
+          sellOrderId = sellResp.orderID ?? sellResp.orderId;
           isSellPath = true; // repayment must be deferred until SELL proceeds arrive
+
+          // ── Background: poll for fill; auto-repost at floor if stale ─────────
+          // This runs async — client polls settle on its own cadence as well.
+          // Non-blocking: any error here is logged but never surfaces to user.
+          if (sellOrderId) {
+            const _sellId = sellOrderId;
+            (async () => {
+              try {
+                const filled = await pollOrderFilled(walletAddress, creds, _sellId, 30_000);
+                if (!filled) {
+                  console.log(`[close] SELL ${_sellId} not filled in 30s — cancelling and reposting at floor`);
+                  await cancelOrder(walletAddress, creds, _sellId);
+                  const reResp = await repostAtFloor(walletAddress, creds, sellWithSig);
+                  console.log("[close] floor-repost response:", reResp);
+                }
+              } catch (bgErr: any) {
+                console.warn("[close] background fill-poll error:", bgErr?.message ?? bgErr);
+              }
+            })();
+          }
         } else if (!isRecoveryId) {
           // Real order ID but no SELL order provided — cancel succeeded or order expired
           console.log("[close] order cancelled / no SELL needed for:", orderId);
@@ -312,6 +431,7 @@ export async function POST(req: NextRequest) {
       ok:          true,
       orderId,
       closeTxHash,
+      sellOrderId, // SELL order ID on Polymarket (for client-side fill polling)
       // repayPending=true tells the client to call /api/trade/settle after SELL fills
       repayPending:     isSellPath && !!repayAmount && repayAmount > 0,
       repayAmount:      isSellPath ? repayAmount : undefined,
