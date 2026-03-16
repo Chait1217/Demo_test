@@ -296,7 +296,7 @@ export function TradingView() {
     }
   }
 
-  async function enterConfirmClose(positionId: string, tokenId?: string) {
+  async function enterConfirmClose(positionId: string, tokenId?: string, tokenCount?: number) {
     setConfirmClose(positionId);
     setConfirmClosePreview({ id: positionId, bestBid: null, loading: true });
     if (tokenId) {
@@ -305,9 +305,26 @@ export function TradingView() {
           `https://clob.polymarket.com/book?token_id=${tokenId}`,
           { signal: AbortSignal.timeout(5_000) },
         );
-        const book = bookRes.ok ? await bookRes.json() as { bids?: { price: string }[] } : { bids: [] };
-        const bids = (book.bids ?? []) as { price: string }[];
-        const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : null;
+        const book = bookRes.ok
+          ? await bookRes.json() as { bids?: { price: string; size: string }[] }
+          : { bids: [] };
+        const bids = (book.bids ?? []) as { price: string; size: string }[];
+        if (bids.length === 0) {
+          setConfirmClosePreview({ id: positionId, bestBid: null, loading: false });
+          return;
+        }
+        // Compute sweep price: walk bids until cumulative volume covers the position
+        const tokensNeeded = tokenCount ?? 0;
+        let cumulative = 0;
+        let sweepPrice = parseFloat(bids[bids.length - 1].price);
+        for (const bid of bids) {
+          cumulative += parseFloat(bid.size ?? "0");
+          if (tokensNeeded > 0 && cumulative >= tokensNeeded) {
+            sweepPrice = parseFloat(bid.price);
+            break;
+          }
+        }
+        const bestBid = tokensNeeded > 0 ? sweepPrice : parseFloat(bids[0].price);
         setConfirmClosePreview({ id: positionId, bestBid, loading: false });
       } catch {
         setConfirmClosePreview({ id: positionId, bestBid: null, loading: false });
@@ -372,25 +389,9 @@ export function TradingView() {
             await publicClient!.waitForTransactionReceipt({ hash: approveTx });
           }
           const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-          // Fetch real-time best bid from CLOB for guaranteed immediate fill.
-          // Falls back to mid − spread/2 if the order book is unreachable.
-          let tickPrice: number;
-          try {
-            const bookRes = await fetch(
-              `https://clob.polymarket.com/book?token_id=${pos.tokenId}`,
-              { signal: AbortSignal.timeout(5_000) },
-            );
-            const book = bookRes.ok ? await bookRes.json() as { bids?: { price: string }[] } : { bids: [] };
-            const bids    = (book.bids ?? []) as { price: string }[];
-            if (bids.length === 0) throw new Error("No bids in order book — market has no liquidity to sell into right now. Try again shortly.");
-            const bestBid = parseFloat(bids[0].price);
-            tickPrice = Math.max(Math.round(bestBid * 100) / 100, 0.01);
-          } catch {
-            const posMidSell = pos.side === "YES" ? yesPrice : noPrice;
-            tickPrice = Math.max(Math.round(Math.max(posMidSell - spread / 2, 0.01) * 100) / 100, 0.01);
-          }
 
-          // Read the exact on-chain balance so we never try to sell more than we hold.
+          // Read the exact on-chain balance first so we know exactly how many tokens to sell
+          // before fetching the book (need the size to sweep correctly).
           // makerAmount must be a multiple of 10_000 (max 2 dp in token units) → floor, not round.
           // takerAmount must be a multiple of 100   (max 4 dp in USDC  units) → derived from floored maker.
           const onChainBalance = await publicClient!.readContract({
@@ -400,7 +401,44 @@ export function TradingView() {
             args:         [address as `0x${string}`, BigInt(pos.tokenId)],
           }) as bigint;
           const makerAmountRaw = (BigInt(Math.floor(Number(onChainBalance) / 10_000)) * 10_000n).toString();
-          const takerAmountRaw = (Math.floor((Number(makerAmountRaw) / 1_000_000) * tickPrice * 1_000_000 / 100) * 100).toString();
+          const tokensToSell   = Number(makerAmountRaw) / 1_000_000; // exact token count we're selling
+
+          // Sweep the order book: walk bids from best to worst, accumulating available
+          // liquidity until we cover the full token amount.  The price of the last bid
+          // level we need becomes our limit price, so ALL bids at or above it match
+          // immediately — giving a guaranteed full fill in one order with no GTC residue.
+          // Falls back to mid − spread/2 if the book is unreachable.
+          let tickPrice: number;
+          try {
+            const bookRes = await fetch(
+              `https://clob.polymarket.com/book?token_id=${pos.tokenId}`,
+              { signal: AbortSignal.timeout(5_000) },
+            );
+            const book = bookRes.ok
+              ? await bookRes.json() as { bids?: { price: string; size: string }[] }
+              : { bids: [] };
+            const bids = (book.bids ?? []) as { price: string; size: string }[];
+            if (bids.length === 0) throw new Error("No bids in order book — market has no liquidity to sell into right now. Try again shortly.");
+
+            // Walk the book until cumulative bid volume covers our full position.
+            let cumulative = 0;
+            let sweepPrice = parseFloat(bids[bids.length - 1].price); // worst-case floor
+            for (const bid of bids) {
+              cumulative += parseFloat(bid.size ?? "0");
+              if (cumulative >= tokensToSell) {
+                sweepPrice = parseFloat(bid.price);
+                break;
+              }
+            }
+            tickPrice = Math.max(Math.round(sweepPrice * 100) / 100, 0.01);
+            console.log(`[close] book sweep: need ${tokensToSell} tokens, cumulative liquidity ${cumulative.toFixed(2)} at ${tickPrice}`);
+          } catch (e: any) {
+            if (e.message?.includes("No bids")) throw e; // propagate no-liquidity error
+            const posMidSell = pos.side === "YES" ? yesPrice : noPrice;
+            tickPrice = Math.max(Math.round(Math.max(posMidSell - spread / 2, 0.01) * 100) / 100, 0.01);
+          }
+
+          const takerAmountRaw = (Math.floor(tokensToSell * tickPrice * 1_000_000 / 100) * 100).toString();
           const sellSalt       = Math.round(Math.random() * Date.now()).toString();
 
           sellOrderStruct = {
@@ -769,7 +807,7 @@ export function TradingView() {
                       className="btn-danger"
                       style={{ padding: "7px 16px", fontSize: 12 }}
                       disabled={closing === p.id}
-                      onClick={() => enterConfirmClose(p.id, p.tokenId)}
+                      onClick={() => enterConfirmClose(p.id, p.tokenId, p.tokenCount)}
                     >
                       {closing === p.id ? "Closing…" : "✕ Close Position"}
                     </button>
