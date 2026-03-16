@@ -358,7 +358,8 @@ export function TradingView() {
             );
             const book = bookRes.ok ? await bookRes.json() as { bids?: { price: string }[] } : { bids: [] };
             const bids    = (book.bids ?? []) as { price: string }[];
-            const bestBid = bids.length > 0 ? parseFloat(bids[0].price) : 0;
+            if (bids.length === 0) throw new Error("No bids in order book — market has no liquidity to sell into right now. Try again shortly.");
+            const bestBid = parseFloat(bids[0].price);
             tickPrice = Math.max(Math.round(bestBid * 100) / 100, 0.01);
           } catch {
             const posMidSell = pos.side === "YES" ? yesPrice : noPrice;
@@ -506,6 +507,7 @@ export function TradingView() {
 
         // Retry up to 3 times in case the SELL settles slightly late
         let settled = false;
+        let settleError = "";
         for (let attempt = 0; attempt < 3 && !settled; attempt++) {
           const settleRes = await fetch("/api/trade/settle", {
             method:  "POST",
@@ -526,12 +528,19 @@ export function TradingView() {
             // Proceeds not yet available — wait another 5s and retry
             await new Promise(r => setTimeout(r, 5_000));
           } else {
-            const errText = await settleRes.text();
-            console.warn("[close] settle failed (non-fatal):", errText);
-            settled = true; // Don't loop forever; position is already marked closed
+            // Server error — record it and stop retrying
+            settleError = await settleRes.text();
+            console.error("[close] settle failed:", settleError);
+            break;
           }
         }
-        setSuccess("Position closed — SELL order submitted to Polymarket.");
+        if (settled) {
+          setSuccess("Position closed — repayment settled.");
+        } else if (settleError) {
+          setError(`Position closed but vault repayment failed: ${settleError}. Contact support with order ID: ${positionId}`);
+        } else {
+          setError(`SELL proceeds not yet available after retries. Contact support with order ID: ${positionId}`);
+        }
       } else {
         setSuccess("Position closed.");
       }

@@ -16,6 +16,10 @@ import { privateKeyToAccount } from "viem/accounts";
 import { POLYGON_CHAIN, USDCe_ADDRESS, VAULT_ADDRESS } from "@/lib/constants";
 import { leveragedVaultAbi } from "@/lib/vaultAbi";
 
+// Idempotency guard — prevents double-repayment if the client retries settle
+// after a successful on-chain pull (e.g. network drop after 200 was sent).
+const settledOrders = new Set<string>();
+
 const publicClient = createPublicClient({
   chain:     POLYGON_CHAIN,
   transport: http(process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com", {
@@ -53,6 +57,11 @@ export async function POST(req: NextRequest) {
 
     if (!orderId || !repayAmount || repayAmount <= 0 || !walletAddress) {
       return new Response("Missing required fields", { status: 400 });
+    }
+
+    if (settledOrders.has(orderId)) {
+      console.log(`[settle] already settled orderId=${orderId} — skipping`);
+      return Response.json({ ok: true, orderId, alreadySettled: true });
     }
 
     const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
@@ -116,6 +125,7 @@ export async function POST(req: NextRequest) {
     await publicClient.waitForTransactionReceipt({ hash: repayHash, timeout: 30_000 });
     console.log(`[settle] vault repay: $${repayAmount.toFixed(2)} USDC.e`);
 
+    settledOrders.add(orderId);
     return Response.json({ ok: true, orderId, closeTxHash: pullHash });
   } catch (err: any) {
     console.error("[settle] error:", err);
