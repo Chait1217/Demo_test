@@ -8,6 +8,21 @@ const CONTRACTS = {
 };
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
+async function getBestAsk(tokenId: string): Promise<number | null> {
+  try {
+    const res = await fetch(
+      `https://clob.polymarket.com/book?token_id=${tokenId}`,
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    if (!res.ok) return null;
+    const book = await res.json() as { asks?: { price: string }[] };
+    const asks = book.asks ?? [];
+    return asks.length > 0 ? parseFloat(asks[0].price) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function getExchangeAddress(tokenId: string): Promise<string> {
   try {
     const res = await fetch(
@@ -75,17 +90,23 @@ export async function POST(req: NextRequest) {
       tokenId = side === "YES" ? tokenIds.yes : tokenIds.no;
     }
 
+    // Fetch real-time best ask from CLOB for guaranteed immediate fill.
+    // Falls back to client-provided price if the order book is unreachable.
+    const bestAsk      = await getBestAsk(tokenId);
+    const effectivePrice = bestAsk ?? price;
+    if (bestAsk !== null) console.log(`[prepare] using best ask $${bestAsk} (client sent $${price})`);
+
     // Size in tokens = collateral USDC / price.
     // CRITICAL: use the same rounded price that getBuyAmounts will use (2 d.p., tick size 0.01).
     // If we divide by the raw price but multiply back by the rounded price we can get
     // makerAmount > collateral (e.g. price=0.715 → roundedPrice=0.72, causing a 0.6% overshoot).
     // Dividing by the rounded price first guarantees makerAmount ≤ collateral.
     const preview      = computePositionPreview({ collateral, leverage }, 0);
-    const roundedPrice = Math.round(price * 100) / 100 || price;   // 2 d.p. = CLOB tick size
+    const roundedPrice = Math.round(effectivePrice * 100) / 100 || effectivePrice;   // 2 d.p. = CLOB tick size
     // Use notional (collateral + borrowed) so the order covers the full leveraged size.
     const tokenCount   = roundedPrice > 0 ? preview.notional / roundedPrice : preview.notional;
 
-    const { makerAmount, takerAmount } = getBuyAmounts(tokenCount, price);
+    const { makerAmount, takerAmount } = getBuyAmounts(tokenCount, effectivePrice);
 
     const [exchangeAddress, salt, l1Timestamp] = await Promise.all([
       getExchangeAddress(tokenId).then(addr => { console.log(`[prepare] tokenId=${tokenId.slice(0,10)}… exchange=${addr}`); return addr; }),

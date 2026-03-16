@@ -82,6 +82,9 @@ export function TradingView() {
   const [submitStep, setSubmitStep] = useState<string>("");
   const [closing, setClosing]       = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState<string | null>(null);
+  const [confirmClosePreview, setConfirmClosePreview] = useState<{
+    id: string; bestBid: number | null; loading: boolean;
+  } | null>(null);
   const [syncing, setSyncing]       = useState(false);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
@@ -273,7 +276,9 @@ export function TradingView() {
         },
         state:    "OPEN",
         openedAt: new Date().toISOString(),
-        txHash:   openTxHash, // Real Polygon tx hash (approve tx) if a new approval was needed
+        // Use vault borrow transfer hash as the primary tx hash — it's the
+        // on-chain proof the borrowed funds reached the user's wallet.
+        txHash: json.transferHash ?? openTxHash,
         // Store fields needed to SELL tokens back when closing a filled position
         tokenId:         orderStruct.tokenId as string,
         tokenCount:      Number(BigInt(orderStruct.takerAmount as string)) / 1e6,
@@ -288,6 +293,44 @@ export function TradingView() {
     } finally {
       setSubmitting(false);
       setSubmitStep("");
+    }
+  }
+
+  async function enterConfirmClose(positionId: string, tokenId?: string, tokenCount?: number) {
+    setConfirmClose(positionId);
+    setConfirmClosePreview({ id: positionId, bestBid: null, loading: true });
+    if (tokenId) {
+      try {
+        const bookRes = await fetch(
+          `https://clob.polymarket.com/book?token_id=${tokenId}`,
+          { signal: AbortSignal.timeout(5_000) },
+        );
+        const book = bookRes.ok
+          ? await bookRes.json() as { bids?: { price: string; size: string }[] }
+          : { bids: [] };
+        const bids = (book.bids ?? []) as { price: string; size: string }[];
+        if (bids.length === 0) {
+          setConfirmClosePreview({ id: positionId, bestBid: null, loading: false });
+          return;
+        }
+        // Compute sweep price: walk bids until cumulative volume covers the position
+        const tokensNeeded = tokenCount ?? 0;
+        let cumulative = 0;
+        let sweepPrice = parseFloat(bids[bids.length - 1].price);
+        for (const bid of bids) {
+          cumulative += parseFloat(bid.size ?? "0");
+          if (tokensNeeded > 0 && cumulative >= tokensNeeded) {
+            sweepPrice = parseFloat(bid.price);
+            break;
+          }
+        }
+        const bestBid = tokensNeeded > 0 ? sweepPrice : parseFloat(bids[0].price);
+        setConfirmClosePreview({ id: positionId, bestBid, loading: false });
+      } catch {
+        setConfirmClosePreview({ id: positionId, bestBid: null, loading: false });
+      }
+    } else {
+      setConfirmClosePreview({ id: positionId, bestBid: null, loading: false });
     }
   }
 
@@ -346,13 +389,9 @@ export function TradingView() {
             await publicClient!.waitForTransactionReceipt({ hash: approveTx });
           }
           const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-          // SELL order price must be the bid (mid − spread/2), not the mid.
-          // The CLOB enforces 0.01 tick size on price = takerAmount/makerAmount.
-          const posMidSell = pos.side === "YES" ? yesPrice : noPrice;
-          const bidPrice   = Math.max(posMidSell - spread / 2, 0.01);
-          const tickPrice  = Math.max(Math.round(bidPrice * 100) / 100, 0.01);
 
-          // Read the exact on-chain balance so we never try to sell more than we hold.
+          // Read the exact on-chain balance first so we know exactly how many tokens to sell
+          // before fetching the book (need the size to sweep correctly).
           // makerAmount must be a multiple of 10_000 (max 2 dp in token units) → floor, not round.
           // takerAmount must be a multiple of 100   (max 4 dp in USDC  units) → derived from floored maker.
           const onChainBalance = await publicClient!.readContract({
@@ -362,7 +401,44 @@ export function TradingView() {
             args:         [address as `0x${string}`, BigInt(pos.tokenId)],
           }) as bigint;
           const makerAmountRaw = (BigInt(Math.floor(Number(onChainBalance) / 10_000)) * 10_000n).toString();
-          const takerAmountRaw = (Math.floor((Number(makerAmountRaw) / 1_000_000) * tickPrice * 1_000_000 / 100) * 100).toString();
+          const tokensToSell   = Number(makerAmountRaw) / 1_000_000; // exact token count we're selling
+
+          // Sweep the order book: walk bids from best to worst, accumulating available
+          // liquidity until we cover the full token amount.  The price of the last bid
+          // level we need becomes our limit price, so ALL bids at or above it match
+          // immediately — giving a guaranteed full fill in one order with no GTC residue.
+          // Falls back to mid − spread/2 if the book is unreachable.
+          let tickPrice: number;
+          try {
+            const bookRes = await fetch(
+              `https://clob.polymarket.com/book?token_id=${pos.tokenId}`,
+              { signal: AbortSignal.timeout(5_000) },
+            );
+            const book = bookRes.ok
+              ? await bookRes.json() as { bids?: { price: string; size: string }[] }
+              : { bids: [] };
+            const bids = (book.bids ?? []) as { price: string; size: string }[];
+            if (bids.length === 0) throw new Error("No bids in order book — market has no liquidity to sell into right now. Try again shortly.");
+
+            // Walk the book until cumulative bid volume covers our full position.
+            let cumulative = 0;
+            let sweepPrice = parseFloat(bids[bids.length - 1].price); // worst-case floor
+            for (const bid of bids) {
+              cumulative += parseFloat(bid.size ?? "0");
+              if (cumulative >= tokensToSell) {
+                sweepPrice = parseFloat(bid.price);
+                break;
+              }
+            }
+            tickPrice = Math.max(Math.round(sweepPrice * 100) / 100, 0.01);
+            console.log(`[close] book sweep: need ${tokensToSell} tokens, cumulative liquidity ${cumulative.toFixed(2)} at ${tickPrice}`);
+          } catch (e: any) {
+            if (e.message?.includes("No bids")) throw e; // propagate no-liquidity error
+            const posMidSell = pos.side === "YES" ? yesPrice : noPrice;
+            tickPrice = Math.max(Math.round(Math.max(posMidSell - spread / 2, 0.01) * 100) / 100, 0.01);
+          }
+
+          const takerAmountRaw = (Math.floor(tokensToSell * tickPrice * 1_000_000 / 100) * 100).toString();
           const sellSalt       = Math.round(Math.random() * Date.now()).toString();
 
           sellOrderStruct = {
@@ -423,32 +499,31 @@ export function TradingView() {
         }
       }
 
-      // ── Step: Send borrowed USDC to engine wallet BEFORE calling close route ──
-      // vault.repay() is onlyEngine and uses transferFrom(engine→vault).
-      // The engine must have USDC first. The user transfers it here (before the
-      // close route), so when the server calls vault.repay() it already holds it.
+      // ── Step: Approve engine to pull borrowed USDC.e (approve-and-pull) ─────────
+      // The close route does transferFrom(user→engine) + vault.repay() atomically.
+      // If vault.repay() fails the server returns 500, the position stays open, and
+      // this approval is never exercised — the user's USDC.e stays safe.
       if (!isSimulated && borrowed > 0) {
-        try {
-          const engRes = await fetch("/api/engine-address");
-          const { address: engineAddress } = await engRes.json() as { address: string | null };
-          if (engineAddress) {
-            const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
-            setSubmitStep("Sending repayment to vault engine… (wallet prompt)");
-            const ERC20_TRANSFER_ABI = [{
-              name: "transfer", type: "function", stateMutability: "nonpayable",
-              inputs:  [{ name: "to", type: "address" }, { name: "value", type: "uint256" }],
-              outputs: [{ name: "", type: "bool" }],
-            }] as const;
-            const transferTx = await writeContractAsync({
+        const engRes = await fetch("/api/engine-address");
+        const { address: engineAddress } = await engRes.json() as { address: string | null };
+        if (engineAddress) {
+          const repayRaw = BigInt(Math.round(borrowed * 1_000_000));
+          const currentAllowance = await publicClient!.readContract({
+            address:      USDCe_ADDRESS,
+            abi:          ERC20_APPROVE_ABI,
+            functionName: "allowance",
+            args:         [address as `0x${string}`, engineAddress as `0x${string}`],
+          }) as bigint;
+          if (currentAllowance < repayRaw) {
+            setSubmitStep("Approve repayment… (wallet prompt)");
+            const approveTx = await writeContractAsync({
               address:      USDCe_ADDRESS,
-              abi:          ERC20_TRANSFER_ABI,
-              functionName: "transfer",
+              abi:          ERC20_APPROVE_ABI,
+              functionName: "approve",
               args:         [engineAddress as `0x${string}`, repayRaw],
             });
-            await publicClient!.waitForTransactionReceipt({ hash: transferTx, timeout: 60_000 });
+            await publicClient!.waitForTransactionReceipt({ hash: approveTx, timeout: 60_000 });
           }
-        } catch (repayErr: any) {
-          console.warn("[close] repay transfer non-fatal:", repayErr.message);
         }
       }
 
@@ -474,9 +549,64 @@ export function TradingView() {
         throw new Error(`Close failed (${closeRes.status}): ${errText}`);
       }
 
-      // Only mark CLOSED locally after server confirms the SELL was posted
+      const closeJson = await closeRes.json();
+
+      // Mark CLOSED locally immediately so the UI clears the position
       closePositionLocal(positionId);
-      setSuccess("Position closed — SELL order submitted to Polymarket.");
+
+      // Save closeTxHash if the repayment already happened (cancel path)
+      if (closeJson.closeTxHash) {
+        updatePosition(positionId, { closeTxHash: closeJson.closeTxHash });
+      }
+
+      if (closeJson.repayPending && closeJson.repayAmount > 0) {
+        // SELL path — SELL proceeds are in-flight. Wait ~10s for settlement,
+        // then pull the borrowed repayment. This prevents the -3 wallet drain
+        // that would occur if we pulled before the 3 USDC proceeds arrived.
+        setSuccess("SELL order submitted — awaiting settlement (~10s)…");
+        await new Promise(r => setTimeout(r, 10_000));
+        setSubmitStep("Settling repayment…");
+
+        // Retry up to 3 times in case the SELL settles slightly late
+        let settled = false;
+        let settleError = "";
+        for (let attempt = 0; attempt < 3 && !settled; attempt++) {
+          const settleRes = await fetch("/api/trade/settle", {
+            method:  "POST",
+            headers: { "Content-Type": "application/json" },
+            body:    JSON.stringify({
+              orderId:          positionId,
+              repayAmount:      closeJson.repayAmount,
+              walletAddress:    address,
+              preSellBalance:   closeJson.preSellBalance,
+            }),
+          });
+          if (settleRes.ok) {
+            const settleJson = await settleRes.json();
+            if (settleJson.closeTxHash) {
+              updatePosition(positionId, { closeTxHash: settleJson.closeTxHash });
+            }
+            settled = true;
+          } else if (settleRes.status === 409) {
+            // Proceeds not yet available — wait another 5s and retry
+            await new Promise(r => setTimeout(r, 5_000));
+          } else {
+            // Server error — record it and stop retrying
+            settleError = await settleRes.text();
+            console.error("[close] settle failed:", settleError);
+            break;
+          }
+        }
+        if (settled) {
+          setSuccess("Position closed — repayment settled.");
+        } else if (settleError) {
+          setError(`Position closed but vault repayment failed: ${settleError}. Contact support with order ID: ${positionId}`);
+        } else {
+          setError(`SELL proceeds not yet available after retries. Contact support with order ID: ${positionId}`);
+        }
+      } else {
+        setSuccess("Position closed.");
+      }
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -623,6 +753,13 @@ export function TradingView() {
               const pnlPct    = p.collateral > 0 ? (netPnl / p.collateral) * 100 : 0;
               const pnlColor  = netPnl >= 0 ? "var(--yes-color)" : "var(--danger)";
               const isConfirming = confirmClose === p.id;
+              const preview = isConfirming && confirmClosePreview?.id === p.id ? confirmClosePreview : null;
+              // If we have a real bestBid, compute exact payout; otherwise fall back to estimated exitPx
+              const closePx      = preview?.bestBid ?? exitPx;
+              const sellProceeds = p.tokenCount ? (p.tokenCount / 1_000_000) * closePx : p.notional * (closePx / (p.entryPrice || closePx));
+              const netPayout    = sellProceeds - p.borrowed;
+              const confirmPnl   = netPayout - p.collateral;
+              const confirmPnlColor = confirmPnl >= 0 ? "var(--yes-color)" : "var(--danger)";
               return (
               <div key={p.id} style={{ background: "var(--surface-2)", border: `1px solid ${isConfirming ? "var(--warn)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -632,28 +769,45 @@ export function TradingView() {
                     <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-2)" }}>{p.leverage.toFixed(1)}x leverage</span>
                   </div>
                   {isConfirming ? (
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button
-                        className="btn-danger"
-                        style={{ padding: "7px 14px", fontSize: 12 }}
-                        disabled={closing === p.id}
-                        onClick={() => { setConfirmClose(null); closePosition(p.id, p.borrowed); }}
-                      >
-                        {closing === p.id ? "Closing…" : "Confirm Close"}
-                      </button>
-                      <button
-                        style={{ padding: "7px 12px", fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600, background: "transparent", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-2)", cursor: "pointer" }}
-                        onClick={() => setConfirmClose(null)}
-                      >
-                        Cancel
-                      </button>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
+                      {preview?.loading ? (
+                        <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-3)" }}>Fetching live price…</div>
+                      ) : (
+                        <div style={{ fontFamily: "var(--mono)", fontSize: 11, lineHeight: 1.6, textAlign: "right" }}>
+                          <div style={{ color: "var(--text-2)" }}>
+                            Sell proceeds: <strong style={{ color: "var(--text-1)" }}>${sellProceeds.toFixed(2)}</strong>
+                            {preview?.bestBid != null && <span style={{ color: "var(--text-3)", marginLeft: 4 }}>(bid {preview.bestBid.toFixed(2)})</span>}
+                          </div>
+                          <div style={{ color: "var(--text-2)" }}>Repay vault: <strong style={{ color: "var(--text-1)" }}>−${p.borrowed.toFixed(2)}</strong></div>
+                          <div style={{ color: confirmPnlColor }}>
+                            Net P&amp;L: <strong>{confirmPnl >= 0 ? "+" : ""}${confirmPnl.toFixed(2)}</strong>
+                            {" "}({confirmPnl >= 0 ? "+" : ""}{p.collateral > 0 ? ((confirmPnl / p.collateral) * 100).toFixed(1) : "—"}%)
+                          </div>
+                        </div>
+                      )}
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          className="btn-danger"
+                          style={{ padding: "7px 14px", fontSize: 12 }}
+                          disabled={closing === p.id || preview?.loading}
+                          onClick={() => { setConfirmClose(null); setConfirmClosePreview(null); closePosition(p.id, p.borrowed); }}
+                        >
+                          {closing === p.id ? "Closing…" : "Confirm Close"}
+                        </button>
+                        <button
+                          style={{ padding: "7px 12px", fontSize: 12, fontFamily: "var(--mono)", fontWeight: 600, background: "transparent", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text-2)", cursor: "pointer" }}
+                          onClick={() => { setConfirmClose(null); setConfirmClosePreview(null); }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <button
                       className="btn-danger"
                       style={{ padding: "7px 16px", fontSize: 12 }}
                       disabled={closing === p.id}
-                      onClick={() => setConfirmClose(p.id)}
+                      onClick={() => enterConfirmClose(p.id, p.tokenId, p.tokenCount)}
                     >
                       {closing === p.id ? "Closing…" : "✕ Close Position"}
                     </button>
@@ -661,8 +815,8 @@ export function TradingView() {
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
                   {[
-                    { label: "Entry Price", value: p.entryPrice > 0 ? `$${p.entryPrice.toFixed(4)}` : "N/A" },
-                    { label: "Exit Price",  value: <span style={{ color: "var(--text-1)", fontWeight: 600 }}>${exitPx.toFixed(4)}</span> },
+                    { label: "Entry Price", value: p.entryPrice > 0 ? `${(p.entryPrice * 100).toFixed(1)}¢` : "N/A" },
+                    { label: "Exit Price",  value: <span style={{ color: "var(--text-1)", fontWeight: 600 }}>{(exitPx * 100).toFixed(1)}¢</span> },
                     { label: "Collateral",  value: `$${p.collateral.toFixed(2)}` },
                     { label: "Size",        value: `$${p.notional.toFixed(2)}` },
                   ].map(({ label, value }) => (
@@ -689,7 +843,7 @@ export function TradingView() {
                   <div style={{ marginTop: 10, background: "rgba(255,180,0,0.07)", border: "1px solid rgba(255,180,0,0.25)", borderRadius: 8, padding: "10px 12px" }}>
                     <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--warn)", fontWeight: 600, marginBottom: 6 }}>Close summary</div>
                     {[
-                      { label: "Sell price (bid)", value: `$${exitPx.toFixed(4)}` },
+                      { label: "Sell price (bid)", value: `${(exitPx * 100).toFixed(1)}¢` },
                       { label: "Est. proceeds",    value: `$${(p.notional * exitPx / (p.entryPrice || 1)).toFixed(2)}` },
                       { label: "Net PnL",          value: `${netPnl >= 0 ? "+" : ""}$${netPnl.toFixed(2)} (${pnlPct >= 0 ? "+" : ""}${pnlPct.toFixed(1)}%)` },
                     ].map(({ label, value }) => (
@@ -752,7 +906,7 @@ export function TradingView() {
           <div style={{ background: "var(--surface-2)", border: `1px solid ${side === "YES" ? "var(--yes-color)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
             <div className="metric-label" style={{ color: "var(--yes-color)", marginBottom: 6 }}>YES</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 28, fontWeight: 700, color: "var(--yes-color)" }}>
-              {marketLoading ? "—" : `$${yesPrice.toFixed(3)}`}
+              {marketLoading ? "—" : `${(yesPrice * 100).toFixed(1)}¢`}
             </div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", marginTop: 4 }}>Regime falls by June 30</div>
             <MiniChart history={market?.priceHistory ?? []} color="var(--yes-color)" />
@@ -760,7 +914,7 @@ export function TradingView() {
           <div style={{ background: "var(--surface-2)", border: `1px solid ${side === "NO" ? "var(--no-color)" : "var(--border)"}`, borderRadius: 12, padding: "14px 16px", transition: "border-color 150ms" }}>
             <div className="metric-label" style={{ color: "var(--no-color)", marginBottom: 6 }}>NO</div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 28, fontWeight: 700, color: "var(--no-color)" }}>
-              {marketLoading ? "—" : `$${noPrice.toFixed(3)}`}
+              {marketLoading ? "—" : `${(noPrice * 100).toFixed(1)}¢`}
             </div>
             <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", marginTop: 4 }}>Regime survives until July</div>
             <MiniChart history={(market?.priceHistory ?? []).map((h) => ({ t: h.t, p: 1 - h.p }))} color="var(--no-color)" />
@@ -791,10 +945,10 @@ export function TradingView() {
 
         <div style={{ display: "flex", gap: 10, marginBottom: 18 }}>
           <button className={`side-btn side-btn-yes ${side === "YES" ? "active" : ""}`} onClick={() => setSide("YES")}>
-            LONG YES · {yesPrice.toFixed(3)}
+            LONG YES · {(yesPrice * 100).toFixed(1)}¢
           </button>
           <button className={`side-btn side-btn-no ${side === "NO" ? "active" : ""}`} onClick={() => setSide("NO")}>
-            LONG NO · {noPrice.toFixed(3)}
+            LONG NO · {(noPrice * 100).toFixed(1)}¢
           </button>
         </div>
 
@@ -831,7 +985,7 @@ export function TradingView() {
           <div style={{ background: "var(--surface-2)", borderRadius: 10, padding: "12px 14px" }}>
             {[
               { label: "Side",                value: side ? <span className={`tag tag-${side.toLowerCase()}`}>{side}</span> : <span style={{ color: "var(--text-3)" }}>—</span> },
-              { label: "Entry Price",         value: side ? `$${entryPrice.toFixed(4)}` : "—" },
+              { label: "Entry Price",         value: side ? `${(entryPrice * 100).toFixed(1)}¢` : "—" },
               { label: "Collateral",          value: numCollateral > 0 ? `$${numCollateral.toFixed(2)}` : "—" },
               { label: "Borrowed from Vault", value: preview.borrowed > 0 ? <span style={{ color: "var(--warn)" }}>${preview.borrowed.toFixed(2)}</span> : "—" },
               { label: "Total Position Size", value: preview.notional  > 0 ? <span style={{ color: "var(--text-1)", fontWeight: 600 }}>${preview.notional.toFixed(2)}</span> : "—" },

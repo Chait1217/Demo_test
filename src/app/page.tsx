@@ -44,18 +44,18 @@ export default function HomePage() {
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <div style={{
                 width: 28, height: 28, borderRadius: 8,
-                background: "linear-gradient(135deg, var(--accent), #00b8ff)",
+                background: "linear-gradient(135deg, #00ff6a, #00c44f)",
                 display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 14, fontWeight: 700, color: "#000",
+                fontSize: 11, fontWeight: 800, color: "#000",
                 fontFamily: "var(--mono)",
-              }}>L</div>
+              }}>LM</div>
               <span style={{
                 fontFamily: "var(--sans)",
                 fontWeight: 700,
                 fontSize: 16,
                 color: "var(--text-1)",
                 letterSpacing: "-0.02em",
-              }}>LevMarket</span>
+              }}>LeverMarket</span>
             </div>
             <div style={{
               height: 20,

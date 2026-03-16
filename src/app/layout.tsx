@@ -4,7 +4,7 @@ import { WalletProviders } from "@/lib/wagmi";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 export const metadata = {
-  title: "LevMarket — Leveraged Prediction Terminal",
+  title: "LeverMarket — Leveraged Prediction Terminal",
   description: "Trade leveraged positions on Will the Iranian regime fall by June 30?",
 };
 

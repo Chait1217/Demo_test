@@ -2,8 +2,17 @@ import { NextRequest } from "next/server";
 import { createPublicClient, createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { recordClosePosition } from "@/server/positionsStore";
+import { repayToVault } from "@/server/vaultState";
 import { POLYGON_CHAIN, USDCe_ADDRESS, VAULT_ADDRESS, POLYMARKET_API_HOST } from "@/lib/constants";
 import { leveragedVaultAbi } from "@/lib/vaultAbi";
+
+const ERC20_BALANCE_ABI = [
+  {
+    name: "balanceOf", type: "function", stateMutability: "view",
+    inputs:  [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
 
 const publicClient = createPublicClient({
   chain:     POLYGON_CHAIN,
@@ -174,6 +183,13 @@ export async function POST(req: NextRequest) {
     const isSimulated  = orderId.startsWith("sim_") || orderId.startsWith("placed_");
     const isRecoveryId = orderId.startsWith("balance-");
 
+    // Track whether the position was filled (SELL posted) vs cancelled.
+    // Repayment is deferred for the SELL path because the user's 3 USDC is locked
+    // in the position tokens — pulling repayment before SELL proceeds arrive drains
+    // the wallet by the full notional (e.g. -3 for 1.5 collateral + 2x leverage).
+    let isSellPath = false;
+    let preSellBalance = "0"; // USDC balance before SELL is posted — used by settle to verify proceeds arrived
+
     if (!isSimulated && walletAddress && l1Signature && l1Timestamp != null) {
       const creds = await deriveApiCreds(walletAddress, l1Signature, l1Timestamp, l1Nonce ?? 0);
 
@@ -185,10 +201,26 @@ export async function POST(req: NextRequest) {
 
       if (!cancelled) {
         if (sellOrderStruct && sellOrderSignature) {
+          // Read the user's USDC balance BEFORE posting the SELL.
+          // This baseline lets settle require balance > preSellBalance + repayAmount,
+          // proving SELL proceeds actually arrived before vault repayment runs.
+          // Without this, settle fires early from pre-existing USDC (the partial-fill bug).
+          try {
+            const bal = await publicClient.readContract({
+              address:      USDCe_ADDRESS as `0x${string}`,
+              abi:          ERC20_BALANCE_ABI,
+              functionName: "balanceOf",
+              args:         [walletAddress as `0x${string}`],
+            }) as bigint;
+            preSellBalance = bal.toString();
+            console.log(`[close] pre-SELL balance: $${(Number(bal) / 1e6).toFixed(2)} USDC`);
+          } catch { /* non-fatal — settle will fall back to absolute balance check */ }
+
           // Order was filled (or this is a balance-recovery) — post a SELL to recover USDC
           const sellWithSig = { ...sellOrderStruct, signature: sellOrderSignature };
           const sellResp = await postSellOrder(walletAddress, creds, sellWithSig);
           console.log("[close] SELL order posted:", sellResp);
+          isSellPath = true; // repayment must be deferred until SELL proceeds arrive
         } else if (!isRecoveryId) {
           // Real order ID but no SELL order provided — cancel succeeded or order expired
           console.log("[close] order cancelled / no SELL needed for:", orderId);
@@ -199,15 +231,27 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── 2. Repay vault (server is the marginEngine, onlyEngine on repay()) ──────
-    // The user sent borrowed USDC to the server wallet (engine) before calling
-    // this route. The server now pulls those funds into the vault via repay().
-    const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
-    const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
-    const serverPk  = process.env.POLYMARKET_PRIVATE_KEY;
+    // ── 2. Repay vault ────────────────────────────────────────────────────────
+    // For CANCEL path: repay immediately (Polymarket refunds user, so they have USDC).
+    // For SELL path: defer repayment — the user spent their USDC on tokens and the
+    //   3 USDC proceeds are still in the pending SELL order. Pulling repayment now
+    //   would drain the wallet by the full notional (the -3 bug). The client will
+    //   call /api/trade/settle after the SELL fills (~8s) to complete repayment.
+    // Always update the in-memory vault state so the available liquidity display
+    // stays accurate regardless of which path we take.
+    if (repayAmount && repayAmount > 0) {
+      repayToVault(repayAmount);
+    }
 
-    if (hasVault && repayAmount && repayAmount > 0 && serverPk) {
-      try {
+    let closeTxHash: string | undefined;
+
+    if (!isSellPath) {
+      // CANCEL path — repay on-chain immediately (user has USDC available)
+      const ZERO_ADDR = "0x0000000000000000000000000000000000000000";
+      const hasVault  = VAULT_ADDRESS && VAULT_ADDRESS !== ZERO_ADDR;
+      const serverPk  = process.env.POLYMARKET_PRIVATE_KEY;
+
+      if (hasVault && repayAmount && repayAmount > 0 && serverPk && walletAddress) {
         const repayRaw   = BigInt(Math.round(repayAmount * 1_000_000));
         const rpcUrl     = process.env.POLYGON_RPC_URL ?? "https://polygon-bor-rpc.publicnode.com";
         const account    = privateKeyToAccount(serverPk as `0x${string}`);
@@ -217,17 +261,32 @@ export async function POST(req: NextRequest) {
           transport: http(rpcUrl, { timeout: 30_000, retryCount: 1 }),
         });
 
-        const ERC20_APPROVE_ABI = [{
-          name: "approve", type: "function", stateMutability: "nonpayable",
-          inputs:  [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
-          outputs: [{ name: "", type: "bool" }],
-        }] as const;
+        const ERC20_ABI = [
+          {
+            name: "transferFrom", type: "function", stateMutability: "nonpayable",
+            inputs:  [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "amount", type: "uint256" }],
+            outputs: [{ name: "", type: "bool" }],
+          },
+          {
+            name: "approve", type: "function", stateMutability: "nonpayable",
+            inputs:  [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
+            outputs: [{ name: "", type: "bool" }],
+          },
+        ] as const;
 
-        // vault.repay() calls transferFrom(engine → vault), so the engine wallet
-        // must approve the vault to pull its USDC before calling repay().
+        const pullHash = await walletClient.writeContract({
+          address:      USDCe_ADDRESS,
+          abi:          ERC20_ABI,
+          functionName: "transferFrom",
+          args:         [walletAddress as `0x${string}`, account.address, repayRaw],
+        });
+        await publicClient.waitForTransactionReceipt({ hash: pullHash, timeout: 30_000 });
+        console.log(`[close] pulled $${repayAmount.toFixed(2)} USDC.e from user to engine`);
+        closeTxHash = pullHash;
+
         const approveHash = await walletClient.writeContract({
           address:      USDCe_ADDRESS,
-          abi:          ERC20_APPROVE_ABI,
+          abi:          ERC20_ABI,
           functionName: "approve",
           args:         [VAULT_ADDRESS, repayRaw],
         });
@@ -240,16 +299,24 @@ export async function POST(req: NextRequest) {
           args:         [repayRaw],
         });
         await publicClient.waitForTransactionReceipt({ hash: repayHash, timeout: 30_000 });
-        console.log(`[close] vault repay: $${repayAmount.toFixed(2)} USDC`);
-      } catch (e: any) {
-        console.warn("[close] vault repay non-fatal:", e.message);
+        console.log(`[close] vault repay: $${repayAmount.toFixed(2)} USDC.e`);
       }
+    } else {
+      console.log(`[close] SELL path — vault repayment deferred; client will call /api/trade/settle after SELL fills`);
     }
 
     // ── 3. Record closure ─────────────────────────────────────────────────────
     recordClosePosition(orderId);
 
-    return Response.json({ ok: true, orderId });
+    return Response.json({
+      ok:          true,
+      orderId,
+      closeTxHash,
+      // repayPending=true tells the client to call /api/trade/settle after SELL fills
+      repayPending:     isSellPath && !!repayAmount && repayAmount > 0,
+      repayAmount:      isSellPath ? repayAmount : undefined,
+      preSellBalance:   isSellPath ? preSellBalance : undefined,
+    });
   } catch (err: any) {
     console.error("[close] error:", err);
     return new Response(err.message ?? "Internal error", { status: 500 });
