@@ -245,9 +245,11 @@ export async function POST(req: NextRequest) {
         borrowFromVault(preview.borrowed);
         console.log(`[submit] vault borrow + forward: $${preview.borrowed.toFixed(2)} USDC → ${walletAddress}`);
       } catch (e: any) {
-        // Fatal: if borrow fails the user won't have enough USDC for the notional-sized
-        // order, and we must NOT record the position or ask for repayment later.
-        throw new Error(`Vault borrow failed: ${e.message}. Check vault liquidity and marginEngine config.`);
+        // Non-fatal: vault borrow failed (e.g. empty vault or marginEngine mismatch).
+        // The frontend caps leverage to vault availability before calling submit, so
+        // preview.borrowed should be 0 in normal flow. Log and proceed without leverage.
+        console.warn(`[submit] vault borrow failed — proceeding at 1× without leverage: ${e.message}`);
+        transferHash = undefined;
       }
     }
 

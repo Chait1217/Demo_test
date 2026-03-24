@@ -144,7 +144,12 @@ export function TradingView() {
   const walletBalanceNum      = rawBalance ?? 0;
   const insufficientBalance   = numCollateral > 0 && numCollateral > walletBalanceNum;
   const insufficientLiquidity = preview.borrowed > 0 && snapshot && preview.borrowed > snapshot.available;
-  const canTrade = isConnected && !isWrongChain && !!side && numCollateral > 0 && !insufficientBalance && !insufficientLiquidity && !submitting;
+  // When vault can't cover the requested leverage, fall back to 1× (user's collateral only).
+  const effectiveLeverage = (insufficientLiquidity && numCollateral > 0) ? 1 : leverage;
+  const effectivePreview  = effectiveLeverage !== leverage
+    ? computePositionPreview({ collateral: numCollateral, leverage: effectiveLeverage }, utilization)
+    : preview;
+  const canTrade = isConnected && !isWrongChain && !!side && numCollateral > 0 && !insufficientBalance && !submitting;
 
   async function submit() {
     if (!canTrade || !address || !side) return;
@@ -159,7 +164,7 @@ export function TradingView() {
           walletAddress: address,
           side,
           collateral: numCollateral,
-          leverage,
+          leverage: effectiveLeverage,
           price: entryPrice,
           yesTokenId: market?.yesTokenId ?? "",
           noTokenId:  market?.noTokenId  ?? "",
@@ -289,7 +294,7 @@ export function TradingView() {
           orderSignature,
           side,
           collateral: numCollateral,
-          leverage,
+          leverage: effectiveLeverage,
           price: entryPrice,
         }),
       });
@@ -304,13 +309,13 @@ export function TradingView() {
         side,
         entryPrice,
         collateral: numCollateral,
-        borrowed:  json.preview?.borrowed  ?? preview.borrowed,
-        notional:  json.preview?.notional  ?? preview.notional,
-        leverage,
+        borrowed:  json.preview?.borrowed  ?? effectivePreview.borrowed,
+        notional:  json.preview?.notional  ?? effectivePreview.notional,
+        leverage: effectiveLeverage,
         fees: {
-          openFee:        json.preview?.fees?.openFee        ?? preview.fees.openFee,
+          openFee:        json.preview?.fees?.openFee        ?? effectivePreview.fees.openFee,
           closeFee:       0,
-          liquidationFee: json.preview?.fees?.liquidationFee ?? preview.fees.liquidationFee,
+          liquidationFee: json.preview?.fees?.liquidationFee ?? effectivePreview.fees.liquidationFee,
         },
         state:    "OPEN",
         openedAt: new Date().toISOString(),
@@ -1252,8 +1257,8 @@ export function TradingView() {
           </div>
         )}
         {insufficientLiquidity && (
-          <div className="alert-error" style={{ marginBottom: 12 }}>
-            ✕ Vault has insufficient liquidity. Available: ${snapshot?.available.toFixed(2) ?? "0"}. Deposit into the vault first.
+          <div style={{ marginBottom: 12, padding: "8px 12px", borderRadius: 6, background: "rgba(255,180,0,0.1)", border: "1px solid rgba(255,180,0,0.4)", color: "var(--text-2)", fontSize: 13 }}>
+            ⚠ Vault liquidity unavailable (${snapshot?.available.toFixed(2) ?? "0.00"}). Trading at 1× with your collateral only.
           </div>
         )}
         {error   && <div className="alert-error"   style={{ marginBottom: 12 }}>✕ {error}</div>}
@@ -1268,7 +1273,7 @@ export function TradingView() {
             ? "Select YES or NO"
             : submitting
             ? (submitStep || "Opening Position…")
-            : `Open ${side} Position · $${preview.notional.toFixed(2)}`}
+            : `Open ${side} Position · $${effectivePreview.notional.toFixed(2)}`}
         </button>
         {!isConnected && (
           <p style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-3)", textAlign: "center", marginTop: 8, marginBottom: 0 }}>
