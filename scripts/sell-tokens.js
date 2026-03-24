@@ -83,15 +83,20 @@ async function getApiCreds(wallet) {
 
 function buildHmacHeaders(creds, method, path, body) {
   const ts     = String(Math.floor(Date.now() / 1000));
-  const msg    = ts + method.toUpperCase() + path + (body ?? "");
+  // Only append body to message when it is actually provided (matches Polymarket SDK)
+  const msg    = ts + method.toUpperCase() + path + (body !== undefined ? body : "");
   const crypto = require("crypto");
-  const secret = Buffer.from(creds.secret.replace(/-/g, "+").replace(/_/g, "/"), "base64");
-  const sig    = crypto.createHmac("sha256", secret).update(msg).digest("base64url");
+  const secret = Buffer.from(
+    creds.secret.replace(/-/g, "+").replace(/_/g, "/").replace(/[^A-Za-z0-9+/=]/g, ""),
+    "base64",
+  );
+  // Use standard base64 (keeps = padding) then convert to URL-safe (+ → -, / → _)
+  const sigB64    = crypto.createHmac("sha256", secret).update(msg).digest("base64");
+  const sig       = sigB64.replace(/\+/g, "-").replace(/\//g, "_");
   return {
     "POLY_ADDRESS":    creds.address ?? "",
     "POLY_SIGNATURE":  sig,
     "POLY_TIMESTAMP":  ts,
-    "POLY_NONCE":      "0",
     "POLY_API_KEY":    creds.apiKey,
     "POLY_PASSPHRASE": creds.passphrase,
     "Content-Type":    "application/json",
@@ -177,7 +182,7 @@ async function waitForFill(creds, orderId, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 3_000));
-    const headers = buildHmacHeaders(creds, "GET", `/order/${orderId}`);
+    const headers = buildHmacHeaders(creds, "GET", `/order/${orderId}`, undefined);
     const r = await fetch(`${CLOB_HOST}/order/${orderId}`, { headers });
     if (!r.ok) continue;
     const o = await r.json();
@@ -240,7 +245,7 @@ async function sellToken(wallet, ctf, creds, tokenId, exchangeAddress) {
   await cancelOrder(creds, orderId);
   const floorRes = await fetch(`${CLOB_HOST}/book?token_id=${tokenId}`);
   const floorBook = await floorRes.json();
-  const floorBids = (floorBook.bids ?? []) as { price: string; size: string }[];
+  const floorBids = floorBook.bids ?? [];
   if (floorBids.length === 0) throw new Error("Still no bids after 60s — market may be illiquid.");
   const floorPx = Math.max(Math.round(parseFloat(floorBids[floorBids.length - 1].price) * 100) / 100, 0.01);
   console.log(`  Reposting at floor bid: ${floorPx}`);
