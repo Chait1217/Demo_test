@@ -37,29 +37,42 @@ const ERC1155_ABI = [
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 async function getApiCreds(wallet) {
-  const ts = Math.floor(Date.now() / 1000);
+  const ts    = Math.floor(Date.now() / 1000);
+  const nonce = 0;
   const domain = {
     name: "ClobAuthDomain", version: "1",
     chainId: CHAIN_ID,
-    // no verifyingContract for L1 auth
   };
   const types = { ClobAuth: [
     { name: "address",   type: "address" },
-    { name: "timestamp", type: "uint256" },
+    { name: "timestamp", type: "string"  },
+    { name: "nonce",     type: "uint256" },
+    { name: "message",   type: "string"  },
   ]};
-  const value = { address: wallet.address, timestamp: ts };
+  const value = {
+    address:   wallet.address,
+    timestamp: String(ts),
+    nonce,
+    message:   "This message attests that I control the given wallet",
+  };
 
   const l1Sig = await wallet._signTypedData(domain, types, value);
 
   const headers = {
-    "Content-Type":  "application/json",
+    "Content-Type":   "application/json",
     "POLY_ADDRESS":   wallet.address,
     "POLY_SIGNATURE": l1Sig,
     "POLY_TIMESTAMP": String(ts),
-    "POLY_NONCE":     "0",
+    "POLY_NONCE":     String(nonce),
   };
 
-  const r = await fetch(`${CLOB_HOST}/auth/api-key`, { method: "GET", headers });
+  // Try POST first (create-or-derive); fall back to GET (fetch existing)
+  let r = await fetch(`${CLOB_HOST}/auth/api-key`, {
+    method: "POST", headers, body: "{}",
+  });
+  if (r.status === 401 || r.status === 404) {
+    r = await fetch(`${CLOB_HOST}/auth/api-key`, { method: "GET", headers });
+  }
   if (!r.ok) {
     const body = await r.text();
     throw new Error(`Could not fetch API key: ${r.status} — ${body}`);
@@ -69,16 +82,15 @@ async function getApiCreds(wallet) {
 }
 
 function buildHmacHeaders(creds, method, path, body) {
-  const ts  = String(Math.floor(Date.now() / 1000));
-  const msg = ts + method.toUpperCase() + path + (body ?? "");
-  // Node.js 18 + crypto is available globally, but easier with Buffer here
+  const ts     = String(Math.floor(Date.now() / 1000));
+  const msg    = ts + method.toUpperCase() + path + (body ?? "");
   const crypto = require("crypto");
   const secret = Buffer.from(creds.secret.replace(/-/g, "+").replace(/_/g, "/"), "base64");
   const sig    = crypto.createHmac("sha256", secret).update(msg).digest("base64url");
   return {
-    "POLY_ADDRESS":    creds.address ?? creds.walletAddress ?? "",
-    "POLY_SIGNATURE":  creds.l1Sig,
-    "POLY_TIMESTAMP":  creds.ts.toString(),
+    "POLY_ADDRESS":    creds.address ?? "",
+    "POLY_SIGNATURE":  sig,
+    "POLY_TIMESTAMP":  ts,
     "POLY_NONCE":      "0",
     "POLY_API_KEY":    creds.apiKey,
     "POLY_PASSPHRASE": creds.passphrase,
