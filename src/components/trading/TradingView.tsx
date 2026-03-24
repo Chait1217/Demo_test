@@ -143,7 +143,7 @@ export function TradingView() {
 
   const walletBalanceNum      = rawBalance ?? 0;
   const insufficientBalance   = numCollateral > 0 && numCollateral > walletBalanceNum;
-  const insufficientLiquidity = preview.borrowed > 0 && snapshot && preview.borrowed > snapshot.available;
+  const insufficientLiquidity = preview.borrowed > 0 && vaultDeployed && snapshot && preview.borrowed > snapshot.available;
   // When vault can't cover the requested leverage, fall back to 1× (user's collateral only).
   const effectiveLeverage = (insufficientLiquidity && numCollateral > 0) ? 1 : leverage;
   const effectivePreview  = effectiveLeverage !== leverage
