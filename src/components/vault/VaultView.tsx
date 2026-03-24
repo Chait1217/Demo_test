@@ -46,6 +46,7 @@ const ERC20_ABI = [
 ] as const;
 
 type Phase = "idle" | "simulating" | "approving" | "depositPending" | "done" | "error";
+type RecoverPhase = "idle" | "auto" | "fetch-engine" | "approving" | "repaying" | "done" | "error";
 
 /** Extract a human-readable message from a wagmi/viem error */
 function extractError(e: unknown): string {
@@ -78,6 +79,71 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
   const [mode, setMode]     = useState<"deposit" | "withdraw">("deposit");
   const [phase, setPhase]   = useState<Phase>("idle");
   const [errMsg, setErrMsg] = useState("");
+
+  // ── Vault debt recovery state ──────────────────────────────────────────────
+  const [recoverPhase, setRecoverPhase] = useState<RecoverPhase>("idle");
+  const [recoverErr,   setRecoverErr]   = useState("");
+  const [recoverMsg,   setRecoverMsg]   = useState("");
+
+  const { writeContract: sendRecoverApprove, data: recoverApproveTxHash, isPending: recoverApproveWalletPending } = useWriteContract();
+  const { isLoading: recoverApproveConfirming, isSuccess: recoverApproveConfirmed } = useWaitForTransactionReceipt({ hash: recoverApproveTxHash });
+
+  // When the approval for recovery confirms, call repay-from-wallet
+  useEffect(() => {
+    if (!recoverApproveConfirmed || recoverPhase !== "approving" || !address) return;
+    const stuckAmount = snapshot?.totalBorrowed ?? 0;
+    if (stuckAmount <= 0) return;
+    setRecoverPhase("repaying");
+    fetch("/api/vault/repay-from-wallet", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ walletAddress: address, amount: stuckAmount }),
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await r.text());
+        setRecoverPhase("done");
+        setRecoverMsg(`✓ Recovered $${stuckAmount.toFixed(2)} — vault debt cleared.`);
+        refetchVault();
+      })
+      .catch((e: any) => { setRecoverErr(e.message); setRecoverPhase("error"); });
+  }, [recoverApproveConfirmed]); // eslint-disable-line
+
+  async function handleAutoRecover() {
+    setRecoverPhase("auto"); setRecoverErr(""); setRecoverMsg("");
+    try {
+      const r = await fetch("/api/vault/recover", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      const json = await r.json().catch(() => ({})) as any;
+      if (!r.ok) throw new Error(json.message ?? await r.text());
+      if (json.message?.includes("no USDC")) {
+        setRecoverErr("Engine wallet has no USDC. Use 'Repay from Wallet' instead.");
+        setRecoverPhase("error");
+      } else {
+        setRecoverMsg(`✓ Auto-recovered $${(json.repaid ?? 0).toFixed(2)} USDC.`);
+        setRecoverPhase("done");
+        refetchVault();
+      }
+    } catch (e: any) { setRecoverErr(e.message); setRecoverPhase("error"); }
+  }
+
+  async function handleRepayFromWallet() {
+    if (!address || !publicClient) return;
+    setRecoverPhase("fetch-engine"); setRecoverErr(""); setRecoverMsg("");
+    try {
+      const r = await fetch("/api/engine-address");
+      const { address: engineAddr } = await r.json() as { address: string | null };
+      if (!engineAddr) throw new Error("Engine address not configured");
+      const stuckAmount = snapshot?.totalBorrowed ?? 0;
+      if (stuckAmount <= 0) throw new Error("No debt to repay");
+      const stuckRaw = BigInt(Math.round(stuckAmount * 1_000_000));
+      setRecoverPhase("approving");
+      sendRecoverApprove({
+        address: USDCe_ADDRESS,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [engineAddr as `0x${string}`, stuckRaw],
+      });
+    } catch (e: any) { setRecoverErr(e.message); setRecoverPhase("idle"); }
+  }
 
   const val      = parseFloat(amount) || 0;
   const amountRaw = safeParseAmount(amount);
@@ -325,6 +391,41 @@ export function VaultView({ fullWidth = false }: { fullWidth?: boolean }) {
       ) : (
         <div style={{ textAlign: "center", padding: "16px", background: "var(--surface-2)", borderRadius: 10, border: "1px solid var(--border)" }}>
           <p style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text-3)", margin: 0 }}>Connect wallet to deposit or withdraw</p>
+        </div>
+      )}
+
+      {/* ── Stuck debt recovery ─────────────────────────────────────────── */}
+      {isConnected && isDeployed && (snapshot?.totalBorrowed ?? 0) > 0 && (
+        <div style={{ marginTop: 18, padding: "12px 14px", borderRadius: 8, background: "rgba(255,180,0,0.07)", border: "1px solid rgba(255,180,0,0.3)" }}>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 11, fontWeight: 700, color: "var(--text-1)", marginBottom: 6 }}>
+            ⚠ Stuck Vault Debt — ${(snapshot?.totalBorrowed ?? 0).toFixed(2)} borrowed
+          </div>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text-3)", marginBottom: 10, lineHeight: 1.6 }}>
+            If there are no open positions, this debt is stuck. Use Auto Recover (if engine has USDC) or Repay from your wallet.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              className="btn-primary"
+              style={{ fontSize: 11, padding: "6px 12px" }}
+              disabled={recoverPhase !== "idle" && recoverPhase !== "error" && recoverPhase !== "done"}
+              onClick={handleAutoRecover}
+            >
+              {recoverPhase === "auto" ? "Recovering…" : "Auto Recover"}
+            </button>
+            <button
+              className="btn-primary"
+              style={{ fontSize: 11, padding: "6px 12px", background: "var(--surface-2)", color: "var(--text-1)" }}
+              disabled={recoverPhase !== "idle" && recoverPhase !== "error" && recoverPhase !== "done"}
+              onClick={handleRepayFromWallet}
+            >
+              {recoverPhase === "fetch-engine" ? "Fetching…"
+                : recoverPhase === "approving" || recoverApproveWalletPending || recoverApproveConfirming ? "Approve in wallet…"
+                : recoverPhase === "repaying" ? "Repaying…"
+                : "Repay from Wallet"}
+            </button>
+          </div>
+          {recoverMsg && <div style={{ marginTop: 8, fontFamily: "var(--mono)", fontSize: 11, color: "var(--success, #22c55e)" }}>{recoverMsg}</div>}
+          {recoverErr && <div style={{ marginTop: 8, fontFamily: "var(--mono)", fontSize: 11, color: "var(--danger)" }}>✕ {recoverErr}</div>}
         </div>
       )}
 
