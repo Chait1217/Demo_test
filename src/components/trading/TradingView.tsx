@@ -382,9 +382,21 @@ export function TradingView() {
       const l1Ts = Math.floor(Date.now() / 1000);
       const l1Signature = await signTypedDataAsync({
         domain: { name: "ClobAuthDomain", version: "1", chainId: polygon.id },
-        types:  { ClobAuth: [{ name: "address", type: "address" }, { name: "timestamp", type: "uint256" }] },
+        types: {
+          ClobAuth: [
+            { name: "address",   type: "address" },
+            { name: "timestamp", type: "string"  },
+            { name: "nonce",     type: "uint256" },
+            { name: "message",   type: "string"  },
+          ],
+        },
         primaryType: "ClobAuth",
-        message: { address: address as `0x${string}`, timestamp: BigInt(l1Ts) },
+        message: {
+          address:   address as `0x${string}`,
+          timestamp: String(l1Ts),
+          nonce:     BigInt(0),
+          message:   "This message attests that I control the given wallet",
+        },
       });
 
       // ── ERC-1155 approval ────────────────────────────────────────────────
