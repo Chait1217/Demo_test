@@ -42,7 +42,8 @@ const FALLBACK: MarketData = {
 
 // Module-level in-process cache
 let cachedMeta: Omit<MarketData, "yesPrice" | "noPrice" | "spread"> | null = null;
-let metaExpiry = 0;
+let metaExpiry   = 0;
+let pricesExpiry = 0;
 let cachedPrices = { yesPrice: 0.5, noPrice: 0.5, spread: 0 };
 
 type GammaMarket = Record<string, unknown>;
@@ -235,7 +236,7 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
     endDate:   (market?.endDate as string) ?? (market?.end_date_iso as string) ?? FALLBACK.endDate,
     priceHistory,
   };
-  metaExpiry = now + 120_000;
+  metaExpiry = now + 60_000;
 
   // Seed cachedPrices from Gamma only as a last-resort fallback (no expiry override)
   if (market && cachedPrices.yesPrice === 0.5) {
@@ -249,9 +250,12 @@ async function fetchMeta(): Promise<Omit<MarketData, "yesPrice" | "noPrice" | "s
   return cachedMeta;
 }
 
-// Fetch live bid/ask from CLOB — no server-side caching so every client poll gets fresh data
+// Fetch live bid/ask from CLOB — 8s server-side cache so rapid client polls
+// don't hammer the CLOB endpoint on every 2s useMarket refetch.
 async function fetchLivePrices(yesTokenId: string) {
   if (!yesTokenId) return cachedPrices;
+  const now = Date.now();
+  if (now < pricesExpiry) return cachedPrices;
 
   try {
     const [sellRes, buyRes] = await Promise.all([
@@ -278,6 +282,7 @@ async function fetchLivePrices(yesTokenId: string) {
         noPrice:  parseFloat(Math.max(1 - mid, 0).toFixed(4)),
         spread:   parseFloat(Math.abs(ask - bid).toFixed(4)),
       };
+      pricesExpiry = Date.now() + 8_000;
       console.log(`[market] Live CLOB prices — YES: ${cachedPrices.yesPrice} NO: ${cachedPrices.noPrice}`);
     } else {
       console.warn(`[market] CLOB prices rejected — bid:${bid} ask:${ask}`);

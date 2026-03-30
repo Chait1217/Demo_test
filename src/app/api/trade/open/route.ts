@@ -127,9 +127,10 @@ export async function POST(req: NextRequest) {
       // Private key is configured — attempt real order and surface any errors
       console.log("[Polymarket] Attempting real order:", { side, price, size: preview.notional });
       const order = await openPolymarketPosition({ side, price, size: preview.notional });
-      console.log("[Polymarket] Order response:", JSON.stringify(order));
-      orderId = order.orderId ?? (order as any).orderID ?? orderId;
+      // orderId is already normalized in polymarketClient
+      orderId = order.orderId || orderId;
       orderStatus = order.status ?? "PLACED";
+      console.log(`[Polymarket] CLOB order placed — id: ${orderId} status: ${orderStatus}`);
     }
 
     // 5. Record position
@@ -149,7 +150,14 @@ export async function POST(req: NextRequest) {
       },
     });
 
-    return Response.json({ orderId, status: orderStatus, preview });
+    const isReal = !orderId.startsWith("sim_");
+    return Response.json({
+      orderId,
+      status:       orderStatus,
+      preview,
+      isReal,
+      portfolioUrl: "https://polymarket.com/portfolio",
+    });
   } catch (err: any) {
     console.error("Trade open error:", err);
     return new Response(err.message ?? "Internal error", { status: 500 });

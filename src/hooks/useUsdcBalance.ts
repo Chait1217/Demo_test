@@ -1,6 +1,6 @@
 "use client";
 
-import { useReadContract, useAccount, useBlockNumber } from "wagmi";
+import { useReadContract, useAccount } from "wagmi";
 import { formatUnits } from "viem";
 import { USDCe_ADDRESS } from "@/lib/constants";
 
@@ -23,8 +23,6 @@ const ERC20_ABI = [
 
 export function useUsdcBalance() {
   const { address } = useAccount();
-  // Watch every new block — balance updates immediately when any tx confirms
-  const { data: blockNumber } = useBlockNumber({ watch: true });
 
   const { data: decimalsData } = useReadContract({
     address: USDCe_ADDRESS,
@@ -37,11 +35,11 @@ export function useUsdcBalance() {
     abi: ERC20_ABI,
     functionName: "balanceOf",
     args: [address!],
-    blockNumber,
     query: {
       enabled: Boolean(address),
-      // Keep showing the previous balance while the new block's value loads,
-      // preventing the 0 → real value flicker on every block.
+      // Poll every 4s — avoids the wagmi blockNumber prop which is broken in
+      // some configurations (causes 0-flicker on every block, infinite refetch).
+      refetchInterval: 4_000,
       placeholderData: (prev: bigint | undefined) => prev,
     },
   });

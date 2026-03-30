@@ -33,7 +33,9 @@ const DEFAULT: MarketData = {
 };
 
 async function fetchMarket(): Promise<MarketData> {
-  const r = await fetch("/api/market", { signal: AbortSignal.timeout(12_000) });
+  // No AbortSignal.timeout — server-side fetches already have their own timeouts.
+  // AbortSignal.timeout has inconsistent browser support and is unnecessary here.
+  const r = await fetch("/api/market");
   if (!r.ok) throw new Error(`Market API error: ${r.status}`);
   return r.json();
 }

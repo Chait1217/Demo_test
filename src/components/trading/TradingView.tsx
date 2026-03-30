@@ -88,6 +88,7 @@ export function TradingView() {
   const [syncing, setSyncing]       = useState(false);
   const [error, setError]           = useState("");
   const [success, setSuccess]       = useState("");
+  const [receiptUrl, setReceiptUrl] = useState<string | null>(null);
   const [orphanedTokens, setOrphanedTokens] = useState<
     { positionId: string; tokenId: string; balance: bigint; exchangeAddress: string; side: string }[]
   >([]);
@@ -153,7 +154,7 @@ export function TradingView() {
 
   async function submit() {
     if (!canTrade || !address || !side) return;
-    setError(""); setSuccess(""); setSubmitting(true);
+    setError(""); setSuccess(""); setReceiptUrl(null); setSubmitting(true);
     try {
       // ── Step 1: Prepare the order struct server-side ──────────────────────
       setSubmitStep("Preparing order…");
@@ -329,7 +330,10 @@ export function TradingView() {
       });
       refetchPositions();
 
-      setSuccess(`Position opened · ID: ${orderId}`);
+      const isReal       = json.isReal as boolean | undefined;
+      const portfolioUrl = json.portfolioUrl as string | undefined;
+      setSuccess(`Position opened · ${isReal ? "Real order" : "Simulated"}: ${orderId}`);
+      setReceiptUrl(isReal && portfolioUrl ? portfolioUrl : null);
       setCollateral(""); setLeverage(1); setSide(null);
     } catch (e: any) {
       setError(e.message);
@@ -1262,7 +1266,14 @@ export function TradingView() {
           </div>
         )}
         {error   && <div className="alert-error"   style={{ marginBottom: 12 }}>✕ {error}</div>}
-        {success && <div className="alert-success" style={{ marginBottom: 12 }}>✓ {success}</div>}
+        {success && (
+          <div className="alert-success" style={{ marginBottom: 12 }}>
+            ✓ {success}
+            {receiptUrl && (
+              <>{" · "}<a href={receiptUrl} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", textDecoration: "underline" }}>View on Polymarket</a></>
+            )}
+          </div>
+        )}
 
         <button className="btn-primary" style={{ width: "100%" }} onClick={submit} disabled={!canTrade}>
           {!isConnected

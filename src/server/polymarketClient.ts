@@ -109,9 +109,9 @@ async function getFullClient(): Promise<ClobClient> {
 
   const signer = new Wallet(privateKey);
 
-  // Bootstrap to derive API credentials
+  // Derive API credentials deterministically (GET /derive-api-key, no create roundtrip)
   const bootstrap = new ClobClient(POLYMARKET_API_HOST, 137, signer as any);
-  const apiCreds  = await bootstrap.createOrDeriveApiKey();
+  const apiCreds  = await bootstrap.deriveApiKey();
 
   fullClient = new ClobClient(
     POLYMARKET_API_HOST,
@@ -138,18 +138,19 @@ export async function openPolymarketPosition(params: OpenPositionParams) {
   // size in CLOB is number of outcome tokens, not USD notional
   const tokenCount = params.price > 0 ? params.size / params.price : params.size;
 
-  const response = await c.createAndPostOrder(
-    {
-      tokenID,
-      price: params.price,
-      size:  tokenCount,
-      side:  Side.BUY, // always BUY the chosen outcome token (YES or NO)
-    },
+  // Two-step: build the signed order struct, then post it. This separates
+  // signing errors from network/CLOB errors and is the idiomatic v5 pattern.
+  const order    = await c.createOrder(
+    { tokenID, price: params.price, size: tokenCount, side: Side.BUY },
     { tickSize: "0.01", negRisk: false },
-    OrderType.GTC
   );
+  const response = await c.postOrder(order, OrderType.GTC);
 
-  return response;
+  // Normalize the order ID across SDK versions (v4: orderID, v5: orderId)
+  const orderId: string = response?.orderId ?? (response as any)?.orderID ?? "";
+  console.log(`[polymarketClient] order placed — id: ${orderId || "(empty)"} status: ${response?.status}`);
+
+  return { ...response, orderId };
 }
 
 export async function closePolymarketPosition(orderId: string) {
