@@ -79,11 +79,25 @@ export function useVault(): {
   const utilizationFloat =
     typeof util?.result === "bigint" ? Number(util.result) / 1e18 : 0;
 
+  const tvlNum      = toNum(tvl);
+  const borrowedNum = toNum(borrowed);
+  // availableLiquidity() = balanceOf(vault) = totalAssets - totalBorrowed.
+  // If the call fails (older deployment or RPC issue), derive it from the
+  // other two values which are more likely to succeed (public state variable
+  // + explicit function). This prevents showing $0.00 when money is present.
+  const availableNum = available?.error
+    ? Math.max(tvlNum - borrowedNum, 0)
+    : toNum(available);
+
+  if (available?.error) {
+    console.warn("[useVault] availableLiquidity() call failed — deriving from totalAssets - totalBorrowed:", available.error);
+  }
+
   return {
     snapshot: {
-      tvl:           toNum(tvl),
-      totalBorrowed: toNum(borrowed),
-      available:     toNum(available),
+      tvl:           tvlNum,
+      totalBorrowed: borrowedNum,
+      available:     availableNum,
       utilization:   utilizationFloat,
       userShare:     toNum(userShare),
       maxWithdraw:   toNum(maxWithdrawRaw),
